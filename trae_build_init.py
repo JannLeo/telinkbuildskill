@@ -377,6 +377,61 @@ def _fallback(root: Path) -> dict[str, Any]:
     }
 
 
+def _detect_serial(root: Path) -> dict[str, Any] | None:
+    """Detect serial-port usage hints in a repo and return a `serial` config fragment.
+
+    Heuristics (read-only):
+    - Telink SDKs (any type already detected) flash/printf over UART; default
+      baud 115200 for logs, no fixed port (auto-detect at capture time).
+    - If a repo contains Python files importing pyserial/serial.Serial, treat as
+      serial-using and use 115200 default.
+    - Repos with tools/flash*.py or RF_Tools/tlsr_tool references also count.
+    - Otherwise return None (no serial section emitted; the schema section is optional).
+    """
+    is_telink = _is_telink_repo(root)
+    has_serial_code = _has_serial_usage(root)
+    if not (is_telink or has_serial_code):
+        return None
+    cfg: dict[str, Any] = {
+        "default_port": "",
+        "baud": 115200,
+        "timeout_seconds": 60,
+        "encoding": "utf-8",
+    }
+    return cfg
+
+
+def _is_telink_repo(root: Path) -> bool:
+    """True if the repo looks like a Telink SDK (has telink_ble/ or tlsr_tc32/ dirs or release_sdk_tool)."""
+    # Directories (telink_ble, tlsr_tc32 are dirs, not files) - check existence at depth<=4.
+    for dirpath in root.rglob("*"):
+        if not dirpath.is_dir():
+            continue
+        rel = dirpath.relative_to(root)
+        if len(rel.parts) > 4:
+            continue
+        name = dirpath.name.lower()
+        if name in ("telink_ble", "tlsr_tc32"):
+            return True
+    # release_sdk_tool marker files (A-type).
+    if _find(root, ["releasesdk.bat", "rleasesdk.bat"], max_depth=4):
+        return True
+    return False
+
+
+def _has_serial_usage(root: Path) -> bool:
+    """True if any Python file in the repo imports pyserial / opens a serial port."""
+    pys = list(root.rglob("*.py"))
+    for p in pys[:200]:  # cap scan for speed
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "import serial" in txt or "serial.Serial" in txt or "pyserial" in txt:
+            return True
+    return False
+
+
 def _platform_finalize(cfg: dict[str, Any], detector_name: str) -> None:
     """Adjust generated config for the current OS.
 
@@ -430,6 +485,9 @@ def detect(root: Path, ide_override: str | None = None) -> tuple[dict[str, Any],
                     cfg["build"]["toolchain"]["studio_exe"] = ide_override
             _platform_finalize(cfg, name)
             cfg["schema_version"] = SCHEMA_VERSION
+            serial_cfg = _detect_serial(root)
+            if serial_cfg:
+                cfg["serial"] = serial_cfg
             return cfg, name
     cfg = _fallback(root)
     return cfg, "fallback template"

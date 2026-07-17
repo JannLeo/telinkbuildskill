@@ -257,7 +257,123 @@ def list_info(project_dir: Path) -> dict[str, Any]:
         "timeout_seconds": cfg["build"].get("timeout_seconds", 900),
         "script": cfg["build"].get("script", {}),
         "toolchain": cfg["build"].get("toolchain", {}),
+        "serial": cfg.get("serial", {}),
     }
+
+
+# ---------------------------------------------------------------------------
+# Serial port capture (optional; requires pyserial)
+# ---------------------------------------------------------------------------
+
+def _import_serial():
+    """Lazy-import pyserial with a friendly error if missing."""
+    try:
+        import serial  # noqa: F401
+        from serial.tools import list_ports  # noqa: F401
+        return serial, list_ports
+    except ImportError as e:
+        raise RuntimeError(
+            "pyserial is required for serial capture. Install it with: pip install pyserial"
+        ) from e
+
+
+def serial_list_ports() -> list[dict[str, Any]]:
+    """List available serial ports (cross-platform). Returns [{port, description, hwid}]."""
+    _, list_ports = _import_serial()
+    out: list[dict[str, Any]] = []
+    for p in list_ports.comports():
+        out.append({"port": p.device, "description": p.description, "hwid": p.hwid})
+    # Sort: COM ports numerically, others lexically.
+    import re as _re
+    def keyfn(x):
+        m = _re.match(r"COM(\d+)", x["port"])
+        return (0, int(m.group(1))) if m else (1, x["port"])
+    out.sort(key=keyfn)
+    return out
+
+
+def serial_capture(
+    project_dir: Path,
+    port: str = "",
+    baud: int | None = None,
+    duration_seconds: float = 5.0,
+    max_lines: int = 200,
+    timeout_seconds: float | None = None,
+    encoding: str = "utf-8",
+    errors: str = "replace",
+) -> dict[str, Any]:
+    """Open a serial port and capture output for a bounded time/line count.
+
+    Reads `cfg["serial"]` from builder.json for defaults (baud, port, timeout).
+    Caller args override config. Returns the captured text plus metadata.
+    """
+    project_dir = project_dir.resolve()
+    cfg = load_builder(project_dir)
+    s_cfg = cfg.get("serial", {})
+    port = port or s_cfg.get("default_port", "")
+    baud = baud if baud is not None else int(s_cfg.get("baud", 115200))
+    if timeout_seconds is None:
+        timeout_seconds = float(s_cfg.get("timeout_seconds", 60))
+    if not port:
+        # Auto-pick first available port if none configured/specified.
+        ports = serial_list_ports()
+        if not ports:
+            return {"status": "error", "error": "No serial port specified and none detected. Set serial.default_port in builder.json or pass port."}
+        port = ports[0]["port"]
+
+    serial_mod, _ = _import_serial()
+    result: dict[str, Any] = {
+        "project_dir": str(project_dir),
+        "port": port,
+        "baud": baud,
+        "duration_seconds": duration_seconds,
+        "max_lines": max_lines,
+    }
+    lines: list[str] = []
+    started = time.time()
+    try:
+        with serial_mod.Serial(port=port, baudrate=baud, timeout=0.1) as ser:
+            log(f"[serial] capturing {port} @ {baud} for {duration_seconds}s (max {max_lines} lines)")
+            buf = bytearray()
+            while True:
+                if time.time() - started > duration_seconds:
+                    break
+                if len(lines) >= max_lines:
+                    break
+                chunk = ser.read(256)
+                if chunk:
+                    buf.extend(chunk)
+                    # Split on any newline; keep incomplete tail in buf.
+                    while True:
+                        nl = buf.find(b"\n")
+                        if nl < 0:
+                            break
+                        line = bytes(buf[:nl])
+                        del buf[: nl + 1]
+                        lines.append(line.decode(encoding, errors=errors).rstrip("\r"))
+                    # Non-blocking-ish: small sleep to yield CPU when idle.
+                else:
+                    time.sleep(0.01)
+            # Flush any trailing bytes without a newline.
+            if buf:
+                lines.append(bytes(buf).decode(encoding, errors=errors).rstrip("\r"))
+    except serial_mod.SerialException as e:
+        result["status"] = "error"
+        result["error"] = f"SerialException: {e}"
+        result["lines"] = lines
+        return result
+    except Exception as e:  # noqa: BLE001
+        result["status"] = "error"
+        result["error"] = f"{type(e).__name__}: {e}"
+        return result
+
+    text = "\n".join(lines)
+    result["line_count"] = len(lines)
+    result["byte_count"] = len(text.encode(encoding, errors=errors))
+    result["elapsed_seconds"] = round(time.time() - started, 2)
+    result["capture"] = text
+    result["status"] = "captured" if lines else "no-data"
+    return result
 
 
 def main() -> int:
@@ -273,6 +389,15 @@ def main() -> int:
     p_build.add_argument("--param", action="append", default=[], metavar="NAME=VALUE",
                          help="Override a parameter, e.g. --param Target=tx")
     p_list = sub.add_parser("list", help="List build artifacts")
+
+    p_serial = sub.add_parser("serial", help="Serial port capture (requires pyserial)")
+    p_serial_sub = p_serial.add_subparsers(dest="serial_command")
+    p_serial_sub.add_parser("list", help="List available serial ports")
+    p_scap = p_serial_sub.add_parser("capture", help="Capture serial output")
+    p_scap.add_argument("--port", default="", help="Serial port (e.g. COM3 / /dev/ttyUSB0); empty = config default or auto-detect")
+    p_scap.add_argument("--baud", type=int, default=None, help="Baud rate; empty = config default (115200)")
+    p_scap.add_argument("--duration", type=float, default=5.0, help="Capture duration in seconds")
+    p_scap.add_argument("--max-lines", type=int, default=200, help="Max lines to capture")
 
     args = parser.parse_args()
     project_dir = Path(args.project).resolve()
@@ -309,6 +434,26 @@ def main() -> int:
             arts = scan_artifacts(cfg, project_dir)
             print(json.dumps(arts, indent=2, ensure_ascii=False))
             return 0
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+
+    if args.command == "serial":
+        try:
+            if args.serial_command == "list":
+                ports = serial_list_ports()
+                print(json.dumps(ports, indent=2, ensure_ascii=False))
+                return 0
+            if args.serial_command == "capture":
+                res = serial_capture(project_dir, port=args.port, baud=args.baud,
+                                      duration_seconds=args.duration, max_lines=args.max_lines)
+                print(json.dumps(res, indent=2, ensure_ascii=False))
+                return 0 if res.get("status") in ("captured", "no-data") else 1
+            print("Usage: serial <list|capture> ...", file=sys.stderr)
+            return 2
+        except RuntimeError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
         except FileNotFoundError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2

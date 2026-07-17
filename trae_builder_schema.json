@@ -98,6 +98,18 @@
         "timeout_seconds": {"type": "integer", "default": 900, "description": "Build timeout in seconds."},
         "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Extra environment variables merged into the build subprocess environment."}
       }
+    },
+    "serial": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional serial port capture settings. When present, enables the serial_list / serial_capture MCP tools to use these defaults. Independent of build.",
+      "properties": {
+        "default_port": {"type": "string", "default": "", "description": "Default serial port (e.g. 'COM3', '/dev/ttyUSB0'). Empty = auto-detect first available."},
+        "baud": {"type": "integer", "default": 115200, "description": "Baud rate. Telink UART log default 115200; RX data stream often 9600."},
+        "timeout_seconds": {"type": "integer", "default": 60, "description": "Per-capture hard timeout (safety)."},
+        "encoding": {"type": "string", "default": "utf-8", "description": "Decode bytes to text with this encoding (use 'replace' on error)."},
+        "capture_dir": {"type": "string", "description": "Optional directory to save capture logs (relative to project root)."}
+      }
     }
   }
 }

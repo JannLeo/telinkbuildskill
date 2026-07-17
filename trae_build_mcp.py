@@ -146,6 +146,46 @@ def _tool_build_list(args: dict[str, Any]) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": f"ERROR: {type(e).__name__}: {e}"}], "isError": True}
 
 
+def _tool_serial_list(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        ports = runner.serial_list_ports()
+        if not ports:
+            return {"content": [{"type": "text", "text": "No serial ports detected."}]}
+        return {"content": [{"type": "text", "text": json.dumps(ports, indent=2, ensure_ascii=False)}]}
+    except RuntimeError as e:
+        return {"content": [{"type": "text", "text": f"ERROR: {e}"}], "isError": True}
+    except Exception as e:  # noqa: BLE001
+        return {"content": [{"type": "text", "text": f"ERROR: {type(e).__name__}: {e}"}], "isError": True}
+
+
+def _tool_serial_capture(args: dict[str, Any]) -> dict[str, Any]:
+    project = args.get("project") or str(_project_dir())
+    port = args.get("port", "")
+    baud = args.get("baud")
+    duration = args.get("duration_seconds", 5.0)
+    max_lines = args.get("max_lines", 200)
+    try:
+        res = runner.serial_capture(
+            Path(project), port=port, baud=baud,
+            duration_seconds=duration, max_lines=max_lines,
+        )
+        # Return a readable text summary plus the raw capture.
+        summary = (f"status={res.get('status')} port={res.get('port')} baud={res.get('baud')} "
+                   f"lines={res.get('line_count', 0)} bytes={res.get('byte_count', 0)} "
+                   f"elapsed={res.get('elapsed_seconds', 0)}s")
+        if res.get("error"):
+            summary += f"\nerror: {res['error']}"
+        capture = res.get("capture", "")
+        text = summary + ("\n\n--- capture ---\n" + capture if capture else "\n(no data)")
+        return {"content": [{"type": "text", "text": text}]}
+    except RuntimeError as e:
+        return {"content": [{"type": "text", "text": f"ERROR: {e}"}], "isError": True}
+    except FileNotFoundError as e:
+        return {"content": [{"type": "text", "text": f"ERROR: {e}"}], "isError": True}
+    except Exception as e:  # noqa: BLE001
+        return {"content": [{"type": "text", "text": f"ERROR: {type(e).__name__}: {e}"}], "isError": True}
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "build_info",
@@ -195,6 +235,30 @@ TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "serial_list",
+        "description": "List available serial ports on this machine (cross-platform: COMx on Windows, /dev/tty* on Linux/macOS). Requires pyserial.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "serial_capture",
+        "description": "Open a serial port and capture its output for a bounded duration. Useful to verify firmware behavior after flashing: read the UART log and let the agent judge if 'boot ok' / version string / expected output appears. Port/baud default to builder.json 'serial' section; auto-picks first port if none given.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project root. Defaults to cwd."},
+                "port": {"type": "string", "description": "Serial port (e.g. 'COM3', '/dev/ttyUSB0'). Empty = builder.json serial.default_port or auto-detect."},
+                "baud": {"type": "integer", "description": "Baud rate. Empty = builder.json serial.baud (default 115200)."},
+                "duration_seconds": {"type": "number", "description": "How long to capture, in seconds.", "default": 5.0},
+                "max_lines": {"type": "integer", "description": "Maximum lines to capture.", "default": 200},
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
@@ -202,6 +266,8 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "build_presets": _tool_build_presets,
     "build_run": _tool_build_run,
     "build_list": _tool_build_list,
+    "serial_list": _tool_serial_list,
+    "serial_capture": _tool_serial_capture,
 }
 
 

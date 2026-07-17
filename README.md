@@ -83,6 +83,8 @@ IDE 路径:C:\TelinkIoTStudio
 | `build_presets` | 列出 `builder.json` 里定义的预设。 |
 | `build_run` | 执行一次构建。可传 `preset` 和/或 `params` 覆盖;`dry_run` 只打印命令不执行。 |
 | `build_list` | 列出已收集的构建产物(按 `artifacts.scan_dirs` 和 `max_age_hours` 过滤)。 |
+| `serial_list` | 列出本机可用串口(Windows COMx / Linux/macOS /dev/tty*)。需 pyserial。 |
+| `serial_capture` | 抓取串口输出(默认 5 秒/200 行),用于烧录后验证固件行为。端口/波特率默认取 `builder.json` 的 `serial` 段;留空自动选第一个串口。agent 拿到日志原文自行判断"功能对不对"(如有没有 `boot ok`/版本号)。需 pyserial。 |
 
 ## 命令行直接使用(不经过 Trae)
 
@@ -101,7 +103,20 @@ python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径>
 
 # 列出产物
 python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> list
+
+# 列出串口(需 pyserial)
+python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> serial list
+
+# 抓取串口输出 5 秒(端口/波特率默认取 builder.json 的 serial 段,留空自动选第一个)
+python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> serial capture --port COM3 --baud 115200 --duration 5
 ```
+
+## 依赖
+
+- **Python 3.8+**
+- **构建功能**:零第三方依赖(纯 stdlib)
+- **串口抓取**:可选依赖 `pyserial`(`pip install pyserial`),未装时 serial_list/serial_capture 会给出友好提示
+- **Eclipse headless 编译**:需对应平台的 Telink IoT Studio / Eclipse CDT
 
 ## 注册到 Trae CLI
 
