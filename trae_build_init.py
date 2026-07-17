@@ -276,20 +276,18 @@ def _detect_telink_eclipse_only(root: Path) -> dict[str, Any] | None:
         {"name": "WorkspaceDir", "type": "path", "default": "", "description": "Eclipse workspace dir; empty = auto (../woekspace/<sdkname>)"},
         {"name": "OutputDir", "type": "path", "default": "build_variants", "description": "Where collected artifacts go"},
     ]
-    # Generate one preset per (project, config). Cap totals to keep list readable
-    # while covering all real configs (Telink SDKs encode chip prefix in config
-    # names: 'B80_dongle_flash', 'B80b_dongle_flash', so preset name = cfg.lower()
-    # is unique across projects; defensive dedup falls back to proj_name prefix).
-    MAX_TOTAL_PRESETS = 20
-    MAX_CONFIGS_PER_PROJECT = 12
+    # Generate one preset per (project, config) so all real Eclipse configurations
+    # are available. No global cap: a repo with N projects × M configs needs all
+    # N*M presets to be usable; truncating hides valid build targets.
+    # Only cap per-project configs as a safety net against pathological .cproject
+    # files with dozens of configs. Telink config names already encode chip prefix
+    # ('B80_dongle_flash', 'B80b_dongle_flash'), so preset name = cfg.lower() is
+    # unique across projects; defensive dedup falls back to proj_name prefix.
+    MAX_CONFIGS_PER_PROJECT = 20
     presets: list[dict[str, Any]] = []
     used_preset_names: set[str] = set()
     for proj_name, prel, cfgs in entries:
-        if len(presets) >= MAX_TOTAL_PRESETS:
-            break
         for cfg in cfgs[:MAX_CONFIGS_PER_PROJECT]:
-            if len(presets) >= MAX_TOTAL_PRESETS:
-                break
             # Preset name: lowercased config name (already encodes chip prefix in
             # Telink SDKs: 'B80_dongle_flash', 'B80b_dongle_flash', etc.).
             pname = cfg.lower().replace(" ", "_").replace("/", "_")
