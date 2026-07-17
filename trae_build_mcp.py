@@ -316,7 +316,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "project": {"type": "string", "description": "Project root. Defaults to cwd."},
                 "chip": {"type": "string", "description": "bdt chip prefix, e.g. 'TL721X','B80','TC321X'. Empty = builder.json flash.default_chip or inferred from presets."},
-                "command": {"type": "string", "enum": ["wf","rf","wc","rc","wa","ra","wo","ro","lf","rst","pc","ac"], "default": "wf", "description": "bdt command."},
+                "command": {"type": "string", "enum": ["wf","rf","wc","rc","wa","ra","wo","ro","lf","rst","pc","ac","sws","help"], "default": "wf", "description": "bdt command. wf=write flash, rf=read flash, wc/rc=core, wa/ra=analog, wo/ro=otp, lf=lock flash, rst=reset (-f flash/-c core), pc=print code/PC (-i optional .lst), ac=analyze chip (evk), sws=set sws (evk), help=help."},
                 "address": {"type": "integer", "default": 0, "description": "Flash/core/analog address (decimal)."},
                 "input_file": {"type": "string", "description": "-i input file path (.bin). Empty for wf = latest artifact under build_variants."},
                 "output_file": {"type": "string", "description": "-o output file path for rf/rc/ro."},

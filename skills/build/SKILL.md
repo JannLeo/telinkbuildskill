@@ -59,6 +59,43 @@ python "${COCO_PLUGIN_ROOT}/trae_build_runner.py" --project "${workspaceFolder}"
 
 部分 Telink 仓库有多个 Eclipse 工程（B80/B80B/TC1211 等），builder.json 会为每个工程生成一个预设。用户说"编译 B80 固件"时，选匹配芯片名的预设。
 
+## 烧录与调试（完整闭环）
+
+除编译外，runner 还支持烧录（bdt.exe）和串口抓取，构成"编译→烧录→看串口"闭环。用户说"烧录/flash/下载固件""复位""查看 PC""抓串口"时用对应子命令。
+
+### flash — 烧录/读写/调试（调用 Telink bdt.exe）
+```
+python "${COCO_PLUGIN_ROOT}/trae_build_runner.py" --project "${workspaceFolder}" flash --chip <芯片> --command <命令> [选项]
+```
+- `--chip`：bdt 芯片名（如 TL721X、B80、TC321X；空=builder.json flash.default_chip 或从预设推断）
+- `--command`：bdt 命令：
+  - `wf` 烧录 flash（不指定 --input 时自动取 build_variants 最新 .bin）
+  - `rf` 读 flash 到文件（配合 --output --size）
+  - `wc`/`rc` 读写 core（含 sram 和数字寄存器）
+  - `wa`/`ra` 读写 analog 寄存器
+  - `wo`/`ro` 读写 OTP
+  - `lf` 锁 flash
+  - `rst` 复位（`--command rst` 后加 -f/-c 用 extra_flags，或直接 rst 默认 -f）
+  - `pc` 查看 PC/反汇编（`--input file.lst` 传 .lst 对照）
+  - `ac` 分析芯片（仅 evk 模式）
+  - `sws` set sws（仅 evk 模式）
+- `--input`：-i 输入文件（wf 的 .bin，pc 的 .lst）
+- `--output`：-o 输出文件（rf/rc/ro）
+- `--size`：-s 大小（如 512k、12k）
+- `--erase`：-e 写前擦除
+- `--dry-run`：只打印 bdt 命令
+
+烧录成功后默认自动 `rst -f` 复位（builder.json flash.reset_after_flash，默认 true）。
+
+### serial — 抓串口验证
+```
+python "${COCO_PLUGIN_ROOT}/trae_build_runner.py" --project "${workspaceFolder}" serial list
+python "${COCO_PLUGIN_ROOT}/trae_build_runner.py" --project "${workspaceFolder}" serial capture --port COM3 --baud 115200 --duration 5
+```
+
+### 完整闭环
+用户说"编译并烧录看效果"时，依次：build → flash(wf) → serial capture，把串口日志给用户判断固件行为（如有没有 boot ok / 版本号）。
+
 ## 注意
 
 - `${COCO_PLUGIN_ROOT}` 是插件安装目录，runner 在其中。
