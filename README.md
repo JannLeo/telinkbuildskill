@@ -1,5 +1,7 @@
 # Telink SDK Builder
 
+[English](README.en.md) | 简体中文
+
 通用、SDK 无关的构建编排工具,让 AI 编程助手(Trae / Claude Desktop / Cursor / Cline 等)通过自然语言调用任意 SDK 仓库的构建脚本。
 
 打包为 **TraeCLI plugin**(含 skill + slash command + MCP server),同时其 **MCP server 是标准协议**,任何支持 MCP 的客户端都能直接接入。也可纯命令行使用,不依赖任何 AI 工具。
@@ -28,10 +30,33 @@ trae-cli plugin install telinksdk-builder
 > /build b80_dongle_flash  # 编译 B80 dongle flash 固件
 ```
 
-agent 自动调用 MCP 工具,执行 Eclipse headless 编译,产物回传:
+**`/build-init` 输出**(自动检测,生成配置):
+```text
+检测结果:Telink eclipse-only (C-type)
+构建脚本:scripts/eclipse_headless_build.py
+IDE 路径:C:\TelinkIoTStudio
+预设(25 个,每个对应真实 Eclipse 配置):
+  - 8366_dongle -> 8366_dongle_for_8373_km/8366_dongle
+  - b80_dongle_flash -> B80_Driver_Demo/B80_dongle_flash
+  - b80_dongle_otp -> B80_Driver_Demo/B80_dongle_otp
+  - b80b_mouse_flash_sram -> B80B_Driver_Demo/B80b_mouse_flash_sram
+  - lark_dongle_demo -> TC_PLATFORM_SDK_1211/Lark_Dongle_Demo
+  ... (全覆盖,无截断)
 ```
+
+**`/build b80_dongle_flash` 输出**(真实编译,产物回传):
+```text
 ✓ build: success (exit=0, 42s)
-  copied bin: build_variants/B80_dongle_flash_20260717.bin (17400 bytes)
+  copied bin: build_variants/B80_Driver_Demo_b80_dongle_flash_20260717.bin (17400 bytes)
+```
+
+**`/build info` 输出**(查看配置):
+```text
+项目:telink_8373_kmd_2.4g_mode_sdk (eclipse)
+配置文件:builder.json
+参数(5):IdePath / ProjectPath / BuildTarget / WorkspaceDir / OutputDir
+预设(25):8366_dongle, b80_dongle_flash, ... , lark_dongle_startup_from_boot
+工具链:TelinkIoTStudio.exe, 默认目标 8366_dongle_for_8373_km/8366_dongle
 ```
 
 ## 组成
