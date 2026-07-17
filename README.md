@@ -1,8 +1,38 @@
-# Trae Builder
+# Telink SDK Builder
 
 通用、SDK 无关的构建编排工具,让 AI 编程助手(Trae / Claude Desktop / Cursor / Cline 等)通过自然语言调用任意 SDK 仓库的构建脚本。
 
 打包为 **TraeCLI plugin**(含 skill + slash command + MCP server),同时其 **MCP server 是标准协议**,任何支持 MCP 的客户端都能直接接入。也可纯命令行使用,不依赖任何 AI 工具。
+
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
+![python](https://img.shields.io/badge/python-3.8%2B-green)
+![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![mcp](https://img.shields.io/badge/MCP-stdio-orange)
+
+## 一键安装
+
+**Trae CLI:**
+```bash
+trae-cli plugin marketplace add git@github.com:JannLeo/telinksdk-builder-mcp.git
+trae-cli plugin install telinksdk-builder
+```
+
+**其他 MCP 客户端(Claude Desktop / Cursor / Cline):** 见下方[给非 Trae 工具用](#给非-trae-工具用claude-desktop--cursor--cline--命令行)。
+
+## Demo
+
+在 Trae 里打开任意 Telink SDK 仓库,对话直接说:
+
+```
+> /build-init            # 一键扫描仓库,自动生成 builder.json
+> /build b80_dongle_flash  # 编译 B80 dongle flash 固件
+```
+
+agent 自动调用 MCP 工具,执行 Eclipse headless 编译,产物回传:
+```
+✓ build: success (exit=0, 42s)
+  copied bin: build_variants/B80_dongle_flash_20260717.bin (17400 bytes)
+```
 
 ## 组成
 
@@ -245,3 +275,15 @@ python <BUILDER>/trae_build_mcp.py < <BUILDER>/scripts/_mcp_probe_in.json
 ```
 
 已验证:initialize / tools/list / build_info / build_presets / build_run(dry-run) / build_list / shutdown 全部正常返回。
+
+## 贡献与推广
+
+欢迎 issue / PR。如果你觉得有用,给个 ⭐ 让更多人看到。
+
+**建议在 GitHub 仓库 Settings 里添加 Topics**(提升被搜索到的概率):
+`mcp` `mcp-server` `trae-plugin` `embedded` `firmware` `eclipse-cdt` `telink` `sdk-builder` `cross-platform` `ai-coding`
+
+**分享到社区时可用:**
+- Trae / Claude / MCP 社区(Discord、GitHub Discussions)
+- 嵌入式开发论坛(说明:让 AI 直接编译 Telink/嵌入式 SDK 固件)
+- 掘金/知乎等技术博客(配 demo 截图/录屏效果最佳)

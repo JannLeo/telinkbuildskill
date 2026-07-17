@@ -1,0 +1,12 @@
+{
+  "name": "jannleo-build",
+  "owner": "JannLeo",
+  "plugins": [
+    {
+      "name": "telinksdk-builder",
+      "description": "Build any Telink/embedded SDK (Eclipse headless / Make / generic) via natural language. MCP server + build/build-init commands + skill. Cross-platform (Windows/Linux/macOS).",
+      "version": "1.0.0",
+      "source": "."
+    }
+  ]
+}
