@@ -110,6 +110,23 @@
         "encoding": {"type": "string", "default": "utf-8", "description": "Decode bytes to text with this encoding (use 'replace' on error)."},
         "capture_dir": {"type": "string", "description": "Optional directory to save capture logs (relative to project root)."}
       }
+    },
+    "flash": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional Telink bdt.exe flashing settings. Independent of build. Enables flash_run / flash_info MCP tools.",
+      "properties": {
+        "bdt_path": {"type": "string", "description": "Path to bdt.exe. Default: E:\\TelinkIoTStudio\\tools\\libusbBDT\\bin\\bdt.exe."},
+        "default_chip": {"type": "string", "default": "", "description": "bdt chip prefix, e.g. 'TL721X','B80','TC321X'. Empty = inferred from presets' BuildTarget."},
+        "chip_map": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Map repo chip dir name -> bdt chip prefix, e.g. {'tc122x':'TC122X','B80':'B80'}."},
+        "default_command": {"type": "string", "default": "wf", "enum": ["wf","rf","wc","rc","wa","ra","wo","ro","lf","rst","pc","ac"]},
+        "default_address": {"type": "integer", "default": 0},
+        "default_size": {"type": "string", "default": "", "description": "Default -s size like '512k'."},
+        "default_erase": {"type": "boolean", "default": false},
+        "default_input_file": {"type": "string", "default": "", "description": "Default -i firmware path. Empty = auto-pick latest .bin from build artifacts."},
+        "timeout_seconds": {"type": "integer", "default": 120},
+        "reset_after_flash": {"type": "boolean", "default": true, "description": "Run 'rst -f' after successful wf."}
+      }
     }
   }
 }

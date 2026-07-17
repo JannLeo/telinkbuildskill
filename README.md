@@ -85,6 +85,8 @@ IDE 路径:C:\TelinkIoTStudio
 | `build_list` | 列出已收集的构建产物(按 `artifacts.scan_dirs` 和 `max_age_hours` 过滤)。 |
 | `serial_list` | 列出本机可用串口(Windows COMx / Linux/macOS /dev/tty*)。需 pyserial。 |
 | `serial_capture` | 抓取串口输出(默认 5 秒/200 行),用于烧录后验证固件行为。端口/波特率默认取 `builder.json` 的 `serial` 段;留空自动选第一个串口。agent 拿到日志原文自行判断"功能对不对"(如有没有 `boot ok`/版本号)。需 pyserial。 |
+| `flash_info` | 显示 `builder.json` 的 `flash` 段(默认芯片、bdt.exe 路径、超时、是否自动复位)。不调用 bdt。 |
+| `flash_run` | 调用 Telink `bdt.exe` 烧录/读写/复位芯片(wf 烧录、rf 读 flash、rst 复位等)。芯片名默认取 `flash.default_chip`;`wf` 不指定 input_file 时自动取 `build_variants` 下最新 `.bin` 产物,实现"编译→烧录"闭环;烧录成功后默认自动 `rst -f` 复位(可关)。 |
 
 ## 命令行直接使用(不经过 Trae)
 
@@ -109,6 +111,23 @@ python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径>
 
 # 抓取串口输出 5 秒(端口/波特率默认取 builder.json 的 serial 段,留空自动选第一个)
 python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> serial capture --port COM3 --baud 115200 --duration 5
+
+# 烧录固件(芯片默认取 flash.default_chip;wf 不指定 --input 时自动取最新产物)
+python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> flash --chip B80 --command wf --dry-run
+python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> flash --chip B80 --command wf
+# 读 flash 到文件 / 复位 / 擦除后写
+python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> flash --chip B80 --command rf --output dump.bin --size 12k
+python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> flash --chip B80 --command rst
+python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> flash --chip B80 --command wf --erase --size 512k
+```
+
+## 完整闭环:编译 → 烧录 → 看串口
+
+在 Trae 对话里一句话串起整个嵌入式开发流程:
+```
+> /build b80_dongle_flash          # 1. 编译出 bin
+> 烧录到 B80                        # 2. agent 调 flash_run(wf),自动取最新 bin,烧完自动复位
+> 抓 5 秒串口看看有没有 boot ok     # 3. agent 调 serial_capture,读 UART 日志判断
 ```
 
 ## 依赖

@@ -401,6 +401,56 @@ def _detect_serial(root: Path) -> dict[str, Any] | None:
     return cfg
 
 
+# Default bdt.exe path on Windows (Telink IoT Studio install).
+_DEFAULT_BDT_PATH = r"E:\TelinkIoTStudio\tools\libusbBDT\bin\bdt.exe"
+
+# Repo chip-dir name -> bdt chip prefix (bdt expects UPPER).
+_DEFAULT_CHIP_MAP: dict[str, str] = {
+    "B80": "B80", "B80B": "B80B", "B85": "B85", "B87": "B87", "B89": "B89",
+    "B91": "B91", "B92": "B92",
+    "TC1211": "TC1211", "TC321X": "TC321X", "tc122x": "TC122X", "tc123x": "TC123X",
+    "TL321X": "TL321X", "TL721X": "TL721X", "TL751X": "TL751X", "TL322X": "TL322X",
+}
+
+
+def _detect_flash(root: Path) -> dict[str, Any] | None:
+    """Detect Telink bdt.exe flashing defaults for a repo.
+
+    Only emits a flash section for Telink repos (those with telink_ble/ or
+    tlsr_tc32/ dirs, or a release_sdk_tool marker). Sets bdt_path only if the
+    conventional Windows path exists on this host; otherwise leaves it empty
+    (runner has its own default). Infers default_chip from the repo's chip dirs
+    or presets when possible.
+    """
+    if not _is_telink_repo(root):
+        return None
+    bdt = _DEFAULT_BDT_PATH if Path(_DEFAULT_BDT_PATH).is_file() else ""
+    # Try to infer a default chip from project/tlsr_tc32/<CHIP>/ dirs.
+    chip = ""
+    for d in root.rglob("tlsr_tc32"):
+        if not d.is_dir():
+            continue
+        rel = d.relative_to(root)
+        if len(rel.parts) > 4:
+            continue
+        for child in d.iterdir():
+            if child.is_dir() and child.name in _DEFAULT_CHIP_MAP:
+                chip = _DEFAULT_CHIP_MAP[child.name]
+                break
+        if chip:
+            break
+    cfg: dict[str, Any] = {
+        "default_chip": chip,
+        "default_command": "wf",
+        "default_address": 0,
+        "timeout_seconds": 120,
+        "reset_after_flash": True,
+    }
+    if bdt:
+        cfg["bdt_path"] = bdt
+    return cfg
+
+
 def _is_telink_repo(root: Path) -> bool:
     """True if the repo looks like a Telink SDK (has telink_ble/ or tlsr_tc32/ dirs or release_sdk_tool)."""
     # Directories (telink_ble, tlsr_tc32 are dirs, not files) - check existence at depth<=4.
@@ -488,6 +538,9 @@ def detect(root: Path, ide_override: str | None = None) -> tuple[dict[str, Any],
             serial_cfg = _detect_serial(root)
             if serial_cfg:
                 cfg["serial"] = serial_cfg
+            flash_cfg = _detect_flash(root)
+            if flash_cfg:
+                cfg["flash"] = flash_cfg
             return cfg, name
     cfg = _fallback(root)
     return cfg, "fallback template"

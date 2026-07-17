@@ -186,6 +186,46 @@ def _tool_serial_capture(args: dict[str, Any]) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": f"ERROR: {type(e).__name__}: {e}"}], "isError": True}
 
 
+def _tool_flash_info(args: dict[str, Any]) -> dict[str, Any]:
+    project = args.get("project") or str(_project_dir())
+    try:
+        info = runner.list_info(Path(project))
+        flash = info.get("flash", {})
+        if not flash:
+            return {"content": [{"type": "text", "text": "No 'flash' section in builder.json. Run /build-init to auto-detect, or add a 'flash' section manually."}]}
+        return {"content": [{"type": "text", "text": json.dumps(flash, indent=2, ensure_ascii=False)}]}
+    except FileNotFoundError as e:
+        return {"content": [{"type": "text", "text": f"ERROR: {e}"}], "isError": True}
+    except Exception as e:  # noqa: BLE001
+        return {"content": [{"type": "text", "text": f"ERROR: {type(e).__name__}: {e}"}], "isError": True}
+
+
+def _tool_flash_run(args: dict[str, Any]) -> dict[str, Any]:
+    project = args.get("project") or str(_project_dir())
+    chip = args.get("chip", "")
+    command = args.get("command", "wf")
+    address = args.get("address", 0)
+    input_file = args.get("input_file", "")
+    output_file = args.get("output_file", "")
+    size = args.get("size", "")
+    erase = bool(args.get("erase", False))
+    timeout = args.get("timeout")
+    dry_run = bool(args.get("dry_run", False))
+    try:
+        res = runner.flash_run(
+            Path(project), chip=chip, command=command, address=address,
+            input_file=input_file, output_file=output_file, size=size,
+            erase=erase, timeout=timeout, dry_run=dry_run,
+        )
+        return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+    except FileNotFoundError as e:
+        return {"content": [{"type": "text", "text": f"ERROR: {e}"}], "isError": True}
+    except RuntimeError as e:
+        return {"content": [{"type": "text", "text": f"ERROR: {e}"}], "isError": True}
+    except Exception as e:  # noqa: BLE001
+        return {"content": [{"type": "text", "text": f"ERROR: {type(e).__name__}: {e}"}], "isError": True}
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "build_info",
@@ -259,6 +299,35 @@ TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "flash_info",
+        "description": "Show the 'flash' section of builder.json (default chip, bdt_path, timeout, reset_after_flash). Does not invoke bdt.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "flash_run",
+        "description": "Invoke Telink bdt.exe to write/read flash/core/otp/analog or reset the chip. Reads builder.json 'flash' section for defaults (chip, bdt_path). Use wf to flash firmware (auto-picks latest .bin from build_variants if no input_file), rst -f to reset, rf to read back. Auto-resets after wf unless reset_after_flash=false.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project root. Defaults to cwd."},
+                "chip": {"type": "string", "description": "bdt chip prefix, e.g. 'TL721X','B80','TC321X'. Empty = builder.json flash.default_chip or inferred from presets."},
+                "command": {"type": "string", "enum": ["wf","rf","wc","rc","wa","ra","wo","ro","lf","rst","pc","ac"], "default": "wf", "description": "bdt command."},
+                "address": {"type": "integer", "default": 0, "description": "Flash/core/analog address (decimal)."},
+                "input_file": {"type": "string", "description": "-i input file path (.bin). Empty for wf = latest artifact under build_variants."},
+                "output_file": {"type": "string", "description": "-o output file path for rf/rc/ro."},
+                "size": {"type": "string", "description": "-s size like '512k','12k'."},
+                "erase": {"type": "boolean", "default": False, "description": "Add -e (erase before write)."},
+                "timeout": {"type": "integer", "description": "Override per-op timeout in seconds."},
+                "dry_run": {"type": "boolean", "default": False, "description": "Print bdt command without executing."}
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
@@ -268,6 +337,8 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "build_list": _tool_build_list,
     "serial_list": _tool_serial_list,
     "serial_capture": _tool_serial_capture,
+    "flash_info": _tool_flash_info,
+    "flash_run": _tool_flash_run,
 }
 
 

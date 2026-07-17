@@ -258,6 +258,7 @@ def list_info(project_dir: Path) -> dict[str, Any]:
         "script": cfg["build"].get("script", {}),
         "toolchain": cfg["build"].get("toolchain", {}),
         "serial": cfg.get("serial", {}),
+        "flash": cfg.get("flash", {}),
     }
 
 
@@ -376,6 +377,173 @@ def serial_capture(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Firmware flashing via Telink bdt.exe (optional)
+# ---------------------------------------------------------------------------
+
+# Map common repo chip-dir names to bdt.exe chip prefixes (bdt expects UPPER).
+_DEFAULT_CHIP_MAP: dict[str, str] = {
+    "B80": "B80", "B80B": "B80B", "B85": "B85", "B87": "B87", "B89": "B89",
+    "B91": "B91", "B92": "B92",
+    "TC1211": "TC1211", "TC321X": "TC321X", "tc122x": "TC122X", "tc123x": "TC123X",
+    "TL321X": "TL321X", "TL721X": "TL721X", "TL751X": "TL751X", "TL322X": "TL322X",
+}
+
+_DEFAULT_BDT_PATH = r"E:\TelinkIoTStudio\tools\libusbBDT\bin\bdt.exe"
+
+
+def _latest_artifact_bin(project_dir: Path, cfg: dict[str, Any]) -> str | None:
+    """Return the newest .bin under artifacts.scan_dirs, or None."""
+    art = cfg.get("build", {}).get("artifacts", {})
+    scan_dirs = art.get("scan_dirs", ["build_variants"])
+    pattern = art.get("name_pattern", "*.bin")
+    candidates: list[Path] = []
+    for d in scan_dirs:
+        p = (project_dir / d).resolve()
+        if p.is_dir():
+            candidates.extend(p.glob(pattern))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(candidates[0])
+
+
+def flash_run(
+    project_dir: Path,
+    chip: str = "",
+    command: str = "wf",
+    address: int | str = 0,
+    input_file: str = "",
+    output_file: str = "",
+    size: str = "",
+    erase: bool = False,
+    extra_flags: list[str] | None = None,
+    timeout: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Invoke Telink bdt.exe to flash/read/reset the chip.
+
+    Reads `cfg["flash"]` from builder.json for defaults (bdt_path, default_chip,
+    chip_map, reset_after_flash, timeout). Caller args override config.
+    """
+    project_dir = project_dir.resolve()
+    cfg = load_builder(project_dir)
+    f_cfg = cfg.get("flash", {})
+    bdt_path = f_cfg.get("bdt_path") or _DEFAULT_BDT_PATH
+
+    # Resolve chip: arg > config default_chip > map from any preset's chip.
+    chip = chip or f_cfg.get("default_chip", "")
+    if not chip:
+        # Try to infer from presets' BuildTarget (e.g. "B80/Release" -> "B80").
+        for p in cfg.get("build", {}).get("presets", []):
+            bt = p.get("params", {}).get("BuildTarget", "")
+            if "/" in bt:
+                head = bt.split("/", 1)[0]
+                chip = _DEFAULT_CHIP_MAP.get(head, head)
+                break
+    if not chip:
+        return {"status": "error",
+                "error": "No chip specified. Set flash.default_chip in builder.json or pass chip=."}
+
+    # Auto-pick latest artifact as input_file for wf when none given.
+    if not input_file and command in ("wf", "wc", "wo"):
+        auto = f_cfg.get("default_input_file", "")
+        if auto:
+            input_file = auto
+        else:
+            latest = _latest_artifact_bin(project_dir, cfg)
+            if latest:
+                input_file = latest
+                log(f"[flash] auto-selected latest artifact: {latest}")
+
+    if timeout is None:
+        timeout = int(f_cfg.get("timeout_seconds", 120))
+
+    # Build command: bdt.exe <CHIP> <command> <address> [flags...]
+    cmd: list[str] = [bdt_path, chip, command, str(address)]
+    if input_file:
+        cmd += ["-i", str(input_file)]
+    if output_file:
+        cmd += ["-o", str(output_file)]
+    if size:
+        cmd += ["-s", str(size)]
+    if erase or f_cfg.get("default_erase", False):
+        cmd += ["-e"]
+    if extra_flags:
+        cmd += list(extra_flags)
+
+    result: dict[str, Any] = {
+        "project_dir": str(project_dir),
+        "bdt_path": bdt_path,
+        "chip": chip,
+        "command": command,
+        "address": address,
+        "input_file": input_file,
+        "output_file": output_file,
+        "size": size,
+        "erase": erase or f_cfg.get("default_erase", False),
+        "timeout_seconds": timeout,
+        "command_line": " ".join(shlex.quote(c) for c in cmd),
+        "dry_run": dry_run,
+    }
+
+    if dry_run:
+        result["status"] = "dry-run"
+        return result
+
+    if not Path(bdt_path).is_file():
+        result["status"] = "error"
+        result["error"] = f"bdt.exe not found at {bdt_path}. Set flash.bdt_path in builder.json."
+        return result
+
+    log(f"[flash] running: {result['command_line']}")
+    started = time.time()
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(project_dir),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            timeout=timeout,
+        )
+        rc = proc.returncode
+        result["exit_code"] = rc
+        result["output"] = (proc.stdout or "")[-4000:]  # tail to bound size
+        result["elapsed_seconds"] = round(time.time() - started, 2)
+        result["status"] = "success" if rc == 0 else "failed"
+        log(f"[flash] {result['status']} (exit={rc}, {result['elapsed_seconds']}s)")
+    except subprocess.TimeoutExpired:
+        result["status"] = "timeout"
+        result["elapsed_seconds"] = round(time.time() - started, 2)
+        result["output"] = "(timed out)"
+        log(f"[flash] TIMEOUT after {timeout}s")
+        return result
+    except FileNotFoundError as e:
+        result["status"] = "error"
+        result["error"] = str(e)
+        result["elapsed_seconds"] = round(time.time() - started, 2)
+        return result
+
+    # Optional auto-reset after write flash.
+    if (rc == 0 and command == "wf"
+            and f_cfg.get("reset_after_flash", True)
+            and not dry_run):
+        rst_cmd = [bdt_path, chip, "rst", "-f"]
+        log(f"[flash] auto-reset: {' '.join(shlex.quote(c) for c in rst_cmd)}")
+        try:
+            rproc = subprocess.run(
+                rst_cmd, cwd=str(project_dir),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=30,
+            )
+            result["reset_exit_code"] = rproc.returncode
+            result["reset_output"] = (rproc.stdout or "")[-2000:]
+        except Exception as e:  # noqa: BLE001
+            result["reset_error"] = f"{type(e).__name__}: {e}"
+
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Trae generic build runner")
     parser.add_argument("--project", default=os.getcwd(), help="Project root containing builder.json")
@@ -398,6 +566,17 @@ def main() -> int:
     p_scap.add_argument("--baud", type=int, default=None, help="Baud rate; empty = config default (115200)")
     p_scap.add_argument("--duration", type=float, default=5.0, help="Capture duration in seconds")
     p_scap.add_argument("--max-lines", type=int, default=200, help="Max lines to capture")
+
+    p_flash = sub.add_parser("flash", help="Flash firmware via Telink bdt.exe")
+    p_flash.add_argument("--chip", default="", help="bdt chip prefix (e.g. TL721X, B80); empty = config default or infer from presets")
+    p_flash.add_argument("--command", dest="command_arg", default="wf", help="bdt command: wf/rf/wc/rc/wa/ra/wo/ro/lf/rst/pc/ac (default wf)")
+    p_flash.add_argument("--address", default="0", help="Address (default 0)")
+    p_flash.add_argument("--input", default="", help="Input file for wf/wc/wo (-i); empty = latest artifact under build_variants")
+    p_flash.add_argument("--output", default="", help="Output file for rf/rc/ro (-o)")
+    p_flash.add_argument("--size", default="", help="Size, e.g. 512k (-s)")
+    p_flash.add_argument("--erase", action="store_true", help="Erase before write (-e)")
+    p_flash.add_argument("--timeout", type=int, default=None, help="Override timeout seconds")
+    p_flash.add_argument("--dry-run", action="store_true", help="Print bdt command without executing")
 
     args = parser.parse_args()
     project_dir = Path(args.project).resolve()
@@ -455,6 +634,18 @@ def main() -> int:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
         except FileNotFoundError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+
+    if args.command == "flash":
+        try:
+            res = flash_run(project_dir, chip=args.chip, command=args.command_arg,
+                            address=args.address, input_file=args.input,
+                            output_file=args.output, size=args.size,
+                            erase=args.erase, timeout=args.timeout, dry_run=args.dry_run)
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+            return 0 if res.get("status") in ("success", "dry-run") else 1
+        except (FileNotFoundError, RuntimeError) as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
 
