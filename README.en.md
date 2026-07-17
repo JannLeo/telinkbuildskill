@@ -55,7 +55,7 @@ Presets (25, one per real Eclipse config):
 | File | Purpose |
 |------|---------|
 | `trae_build_runner.py` | Generic build runner. Reads `builder.json` (or legacy `robin_builder.json`) from the project root, invokes the configured build script with presets/params, collects artifacts. Usable standalone from CLI. |
-| `trae_build_mcp.py` | MCP stdio server (zero deps, pure Python stdlib). Exposes 6 tools for any MCP client. Delegates to the runner. |
+| `trae_build_mcp.py` | MCP stdio server (zero deps, pure Python stdlib). Exposes 8 tools for any MCP client. Delegates to the runner. |
 | `trae_build_init.py` | Generator that auto-detects the build pattern of any repo and emits a `builder.json`. |
 | `trae_builder_schema.json` | JSON Schema for `builder.json` (validation / IDE completion). |
 
@@ -77,6 +77,8 @@ Switching repos needs no tool changes — the same toolchain adapts to any repo 
 | `build_list` | List collected build artifacts (filtered by `artifacts.scan_dirs` and `max_age_hours`). |
 | `serial_list` | List available serial ports on this machine (COMx on Windows, /dev/tty* on Linux/macOS). Requires pyserial. |
 | `serial_capture` | Open a serial port and capture output (default 5s / 200 lines) to verify firmware behavior after flashing. Port/baud default to the `builder.json` `serial` section; auto-picks the first port if none given. The raw log is returned for the agent to judge whether the firmware behaves correctly (e.g. `boot ok` / version string present). Requires pyserial. |
+| `flash_info` | Show the `flash` section of `builder.json` (default chip, bdt.exe path, timeout, reset_after_flash). Does not invoke bdt. |
+| `flash_run` | Invoke Telink `bdt.exe` to write/read flash/core/otp/analog or reset the chip (wf flash, rf read, rst reset, ...). Chip defaults to `flash.default_chip`; when `wf` is used without `input_file`, the latest `.bin` under `build_variants` is auto-selected — closing the build→flash loop. Auto-runs `rst -f` after a successful `wf` unless `reset_after_flash=false`. |
 
 ## Generating builder.json for any repo: `/build-init`
 
@@ -185,6 +187,23 @@ python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo serial list
 
 # Capture serial output for 5 seconds (port/baud default to builder.json 'serial' section; empty = auto-pick first)
 python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo serial capture --port COM3 --baud 115200 --duration 5
+
+# Flash firmware (chip defaults to flash.default_chip; wf without --input auto-picks latest artifact)
+python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo flash --chip B80 --command wf --dry-run
+python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo flash --chip B80 --command wf
+# Read flash to file / reset / erase-then-write
+python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo flash --chip B80 --command rf --output dump.bin --size 12k
+python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo flash --chip B80 --command rst
+python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo flash --chip B80 --command wf --erase --size 512k
+```
+
+## Full loop: build → flash → verify
+
+Chain the whole embedded workflow in one Trae conversation:
+```
+> /build b80_dongle_flash       # 1. compile to .bin
+> flash to B80                   # 2. agent calls flash_run (wf), auto-picks latest .bin, auto-resets
+> capture 5s of serial, check for boot ok   # 3. agent calls serial_capture, reads UART, judges
 ```
 
 ## Requirements
