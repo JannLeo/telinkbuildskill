@@ -1,13 +1,15 @@
 # Trae Builder
 
-通用、SDK 无关的构建编排工具,让 Trae CLI / VSCode Trae 插件能通过自然语言调用任意 SDK 仓库的构建脚本。
+通用、SDK 无关的构建编排工具,让 AI 编程助手(Trae / Claude Desktop / Cursor / Cline 等)通过自然语言调用任意 SDK 仓库的构建脚本。
+
+打包为 **TraeCLI plugin**(含 skill + slash command + MCP server),同时其 **MCP server 是标准协议**,任何支持 MCP 的客户端都能直接接入。也可纯命令行使用,不依赖任何 AI 工具。
 
 ## 组成
 
 | 文件 | 作用 |
 |------|------|
 | `trae_build_runner.py` | 通用构建运行器。读取项目根的 `builder.json`(或旧名 `robin_builder.json`),按 preset / 参数调用配置中指定的构建脚本,收集产物。可独立命令行使用。 |
-| `trae_build_mcp.py` | MCP stdio server(零依赖,纯 Python stdlib)。暴露 4 个工具,供 Trae 会话调用。内部委托给 runner。 |
+| `trae_build_mcp.py` | MCP stdio server(零依赖,纯 Python stdlib)。暴露 4 个工具,供任意 MCP 客户端调用。内部委托给 runner。 |
 | `trae_builder_schema.json` | `builder.json` 的 JSON Schema,可用于校验/IDE 补全。 |
 
 ## 工作原理
@@ -158,11 +160,88 @@ python D:\work\workspace\trae_builder\trae_build_init.py <仓库路径> --ide C:
 }
 ```
 
+## 给非 Trae 工具用(Claude Desktop / Cursor / Cline / 命令行)
+
+本仓库的 MCP server(`trae_build_mcp.py`)是**标准 MCP stdio 协议**,不依赖 Trae。任何支持 MCP 的客户端都能接入,同样获得 `build_info` / `build_presets` / `build_run` / `build_list` 四个工具。
+
+先 clone 仓库(或下载),记下路径(下面用 `<BUILDER>` 代指 clone 后的 `telinkbuildskill` 目录)。
+
+### Claude Desktop
+
+编辑配置文件:
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "trae_builder": {
+      "command": "python",
+      "args": ["<BUILDER>/trae_build_mcp.py"]
+    }
+  }
+}
+```
+
+重启 Claude Desktop,对话框会出现 `build_info` 等工具。
+
+### Cursor
+
+在项目根创建 `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "trae_builder": {
+      "command": "python",
+      "args": ["<BUILDER>/trae_build_mcp.py"]
+    }
+  }
+}
+```
+
+### VSCode(Cline / Continue 等 MCP 扩展)
+
+以 Cline 为例,在其 MCP 设置(通常 `~/.cline/mcp_settings.json` 或扩展设置)加:
+
+```json
+{
+  "mcpServers": {
+    "trae_builder": {
+      "command": "python",
+      "args": ["<BUILDER>/trae_build_mcp.py"]
+    }
+  }
+}
+```
+
+### 任何 MCP 客户端(通用)
+
+stdio 启动命令:`python <BUILDER>/trae_build_mcp.py`,无参数。server 自动发现当前工作区的 `builder.json`。
+
+> 注意:非 Trae 客户端没有 `/build`、`/build-init` 命令和 build skill(那些是 Trae 专用格式),但 MCP 工具完全可用。首次为一个 SDK 仓库生成 `builder.json`,用下面的命令行方式。
+
+### 纯命令行(不依赖任何 AI 客户端)
+
+```bash
+# 生成 builder.json(扫描仓库,自动检测构建模式)
+python <BUILDER>/trae_build_init.py /path/to/sdk-repo
+
+# 查看配置
+python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo info
+
+# 按预设编译
+python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo build --preset rx_default
+
+# 列出产物
+python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo list
+```
+
 ## 自测
 
 ```powershell
 # 直接喂 JSON-RPC 测 MCP server(不依赖 Trae)
-python D:\work\workspace\trae_builder\trae_build_mcp.py < D:\work\workspace\trae_builder\scripts\_mcp_probe_in.json
+python <BUILDER>/trae_build_mcp.py < <BUILDER>/scripts/_mcp_probe_in.json
 ```
 
 已验证:initialize / tools/list / build_info / build_presets / build_run(dry-run) / build_list / shutdown 全部正常返回。
