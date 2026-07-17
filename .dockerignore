@@ -1,0 +1,14 @@
+.git/
+.gitignore
+*.log
+*.bin
+*.lst
+build/
+build_variants/
+__pycache__/
+*.pyc
+README*.md
+LICENSE
+.coco-plugin/
+.trae-plugin/
+.claude-plugin/
