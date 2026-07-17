@@ -92,33 +92,33 @@ IDE 路径:C:\TelinkIoTStudio
 
 ```powershell
 # 查看某项目的构建配置
-python D:\work\workspace\trae_builder\trae_build_runner.py --project D:\work\workspace\tc_ble_lite_sdk-1.2.2_allinone info
+python <BUILDER>/trae_build_runner.py --project <SDK路径> info
 
 # 按预设编译(真实执行)
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> build --preset rx_default
+python <BUILDER>/trae_build_runner.py --project <SDK路径> build --preset rx_default
 
 # 自定义参数 + 超时
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> build --param Target=tx --param RomType=txrx --timeout 1200
+python <BUILDER>/trae_build_runner.py --project <SDK路径> build --param Target=tx --param RomType=txrx --timeout 1200
 
 # 仅打印命令不执行
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> build --preset rx_default --dry-run
+python <BUILDER>/trae_build_runner.py --project <SDK路径> build --preset rx_default --dry-run
 
 # 列出产物
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> list
+python <BUILDER>/trae_build_runner.py --project <SDK路径> list
 
 # 列出串口(需 pyserial)
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> serial list
+python <BUILDER>/trae_build_runner.py --project <SDK路径> serial list
 
 # 抓取串口输出 5 秒(端口/波特率默认取 builder.json 的 serial 段,留空自动选第一个)
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> serial capture --port COM3 --baud 115200 --duration 5
+python <BUILDER>/trae_build_runner.py --project <SDK路径> serial capture --port COM3 --baud 115200 --duration 5
 
 # 烧录固件(芯片默认取 flash.default_chip;wf 不指定 --input 时自动取最新产物)
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> flash --chip B80 --command wf --dry-run
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> flash --chip B80 --command wf
+python <BUILDER>/trae_build_runner.py --project <SDK路径> flash --chip B80 --command wf --dry-run
+python <BUILDER>/trae_build_runner.py --project <SDK路径> flash --chip B80 --command wf
 # 读 flash 到文件 / 复位 / 擦除后写
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> flash --chip B80 --command rf --output dump.bin --size 12k
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> flash --chip B80 --command rst
-python D:\work\workspace\trae_builder\trae_build_runner.py --project <SDK路径> flash --chip B80 --command wf --erase --size 512k
+python <BUILDER>/trae_build_runner.py --project <SDK路径> flash --chip B80 --command rf --output dump.bin --size 12k
+python <BUILDER>/trae_build_runner.py --project <SDK路径> flash --chip B80 --command rst
+python <BUILDER>/trae_build_runner.py --project <SDK路径> flash --chip B80 --command wf --erase --size 512k
 ```
 
 ## 完整闭环:编译 → 烧录 → 看串口
@@ -147,7 +147,7 @@ mcp_servers:
     type: stdio
     command: python
     args:
-      - D:\work\workspace\trae_builder\trae_build_mcp.py
+      - "<BUILDER>/trae_build_mcp.py"
     timeout: 30s
 ```
 
@@ -220,9 +220,9 @@ mcp_servers:
 命令文件在 `~/.trae/commands/build-init.md`。也可命令行直接用:
 
 ```powershell
-python D:\work\workspace\trae_builder\trae_build_init.py <仓库路径> --dry-run   # 预览不写
-python D:\work\workspace\trae_builder\trae_build_init.py <仓库路径>              # 写入 builder.json
-python D:\work\workspace\trae_builder\trae_build_init.py <仓库路径> --ide C:\TelinkIoTStudio
+python <BUILDER>/trae_build_init.py <仓库路径> --dry-run   # 预览不写
+python <BUILDER>/trae_build_init.py <仓库路径>              # 写入 builder.json
+python <BUILDER>/trae_build_init.py <仓库路径> --ide C:\TelinkIoTStudio
 ```
 
 生成后即可 `/build info` 查看、`/build <预设名>` 编译。若是 fallback 模板,按提示编辑 `builder.json` 补全 `build.script.path` 即可。
