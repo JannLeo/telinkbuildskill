@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local test/probe artifacts
+scripts/_*.py
+scripts/_*.ps1
+scripts/_*.txt
+scripts/_*.json
+
+# Build outputs (per-project, not part of plugin)
+/build/
+build_variants/
+*.log
+
+# OS
+Thumbs.db
+.DS_Store

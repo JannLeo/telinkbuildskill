@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Trae Builder Config",
+  "description": "SDK-agnostic build descriptor consumed by trae_build_runner.py and trae_build_mcp.py. Place as `builder.json` in the project root. The legacy name `robin_builder.json` is also accepted for backward compatibility.",
+  "type": "object",
+  "required": ["schema_version", "build"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Schema version. Currently '1.0'.",
+      "const": "1.0"
+    },
+    "sdk": {
+      "type": "object",
+      "description": "Optional descriptive metadata about the project/SDK.",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "type": {"type": "string", "description": "e.g. 'eclipse', 'make', 'cmake', 'custom'"},
+        "description": {"type": "string"}
+      }
+    },
+    "build": {
+      "type": "object",
+      "required": ["script"],
+      "additionalProperties": false,
+      "properties": {
+        "script": {
+          "type": "object",
+          "required": ["path"],
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Path to the build script, relative to the project root. e.g. 'scripts/robin_build_variant.ps1'."
+            },
+            "interpreter": {
+              "type": "string",
+              "description": "Interpreter used to run the script. For .ps1 use 'powershell.exe' or 'pwsh'. For .sh use 'bash'. If omitted and path ends with .ps1, powershell is inferred."
+            },
+            "execution_policy": {
+              "type": "string",
+              "description": "PowerShell -ExecutionPolicy value, e.g. 'Bypass'. Ignored for non-powershell scripts.",
+              "default": "Bypass"
+            }
+          }
+        },
+        "toolchain": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Free-form toolchain metadata (IDE path, default build target, etc.). Read by build_info, not enforced by the runner.",
+          "properties": {
+            "studio_exe": {"type": "string"},
+            "default_build_target": {"type": "string"}
+          }
+        },
+        "parameters": {
+          "type": "array",
+          "description": "Ordered list of build parameters. Each becomes a CLI flag passed to the script in the form -<Name> <value>.",
+          "items": {
+            "type": "object",
+            "required": ["name", "type", "default"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string", "description": "Parameter name; must match a flag the script accepts (e.g. 'Target')."},
+              "type": {"type": "string", "enum": ["enum", "string", "path", "bool", "int"], "description": "Declared type (informational; values are stringified when building CLI args)."},
+              "enum": {"type": "array", "items": {"type": "string"}, "description": "Allowed values when type is 'enum'."},
+              "default": {"description": "Default value used when the caller omits this parameter. Empty string means 'let the script choose'."},
+              "description": {"type": "string"}
+            }
+          }
+        },
+        "presets": {
+          "type": "array",
+          "description": "Named combinations of parameter values for one-click builds.",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string"},
+              "description": {"type": "string"},
+              "params": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}}
+            }
+          }
+        },
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Where to scan for build outputs after a build completes.",
+          "properties": {
+            "scan_dirs": {"type": "array", "items": {"type": "string"}, "description": "Directories (relative to project root) to scan. e.g. ['build_variants']."},
+            "name_pattern": {"type": "string", "default": "*.bin", "description": "Glob pattern for artifact files."},
+            "max_age_hours": {"type": "integer", "default": 168, "description": "Only list artifacts modified within this many hours. 0 = no limit."}
+          }
+        },
+        "timeout_seconds": {"type": "integer", "default": 900, "description": "Build timeout in seconds."},
+        "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Extra environment variables merged into the build subprocess environment."}
+      }
+    }
+  }
+}

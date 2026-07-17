@@ -1,0 +1,13 @@
+# trae-builder Trae plugin
+# Packaged as a TraeCLI plugin: provides MCP server + /build + /build-init commands + build skill.
+# Install: traecli plugin install <this-repo-url>
+mcp_servers:
+  - name: trae_builder
+    type: stdio
+    command: python
+    args:
+      - "${COCO_PLUGIN_ROOT}/trae_build_mcp.py"
+    timeout: 30s
+
+# Plugin 提供的配置优先级低于项目/用户配置；若用户自己在 ~/.trae/trae_cli.yaml
+# 注册了同名 trae_builder MCP server，则以用户配置为准。
