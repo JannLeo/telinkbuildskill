@@ -55,7 +55,7 @@ Presets (25, one per real Eclipse config):
 | File | Purpose |
 |------|---------|
 | `trae_build_runner.py` | Generic build runner. Reads `builder.json` (or legacy `robin_builder.json`) from the project root, invokes the configured build script with presets/params, collects artifacts. Usable standalone from CLI. |
-| `trae_build_mcp.py` | MCP stdio server (zero deps, pure Python stdlib). Exposes 4 tools for any MCP client. Delegates to the runner. |
+| `trae_build_mcp.py` | MCP stdio server (zero deps, pure Python stdlib). Exposes 6 tools for any MCP client. Delegates to the runner. |
 | `trae_build_init.py` | Generator that auto-detects the build pattern of any repo and emits a `builder.json`. |
 | `trae_builder_schema.json` | JSON Schema for `builder.json` (validation / IDE completion). |
 
@@ -75,6 +75,8 @@ Switching repos needs no tool changes — the same toolchain adapts to any repo 
 | `build_presets` | List named presets defined in `builder.json`. |
 | `build_run` | Run a build by preset and/or param overrides; `dry_run` prints the command without executing. |
 | `build_list` | List collected build artifacts (filtered by `artifacts.scan_dirs` and `max_age_hours`). |
+| `serial_list` | List available serial ports on this machine (COMx on Windows, /dev/tty* on Linux/macOS). Requires pyserial. |
+| `serial_capture` | Open a serial port and capture output (default 5s / 200 lines) to verify firmware behavior after flashing. Port/baud default to the `builder.json` `serial` section; auto-picks the first port if none given. The raw log is returned for the agent to judge whether the firmware behaves correctly (e.g. `boot ok` / version string present). Requires pyserial. |
 
 ## Generating builder.json for any repo: `/build-init`
 
@@ -177,7 +179,20 @@ python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo build --preset
 
 # List artifacts
 python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo list
+
+# List serial ports (requires pyserial)
+python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo serial list
+
+# Capture serial output for 5 seconds (port/baud default to builder.json 'serial' section; empty = auto-pick first)
+python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo serial capture --port COM3 --baud 115200 --duration 5
 ```
+
+## Requirements
+
+- **Python 3.8+**
+- **Build features**: zero third-party deps (pure stdlib)
+- **Serial capture**: optional dependency `pyserial` (`pip install pyserial`); serial_list/serial_capture give a friendly install hint if missing
+- **Eclipse headless builds**: the platform-appropriate Telink IoT Studio / Eclipse CDT
 
 ## Self-test
 
@@ -186,7 +201,7 @@ python <BUILDER>/trae_build_runner.py --project /path/to/sdk-repo list
 python <BUILDER>/trae_build_mcp.py < <BUILDER>/scripts/_mcp_probe_in.json
 ```
 
-Verified: initialize / tools/list / build_info / build_presets / build_run (dry-run) / build_list / shutdown all return correctly.
+Verified: initialize / tools/list / build_info / build_presets / build_run (dry-run) / build_list / serial_list / shutdown all return correctly.
 
 ## Contributing & spreading the word
 
