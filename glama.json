@@ -1,0 +1,19 @@
+{
+  "name": "telinksdk-builder-mcp",
+  "description": "Build, flash, and debug any Telink/embedded SDK via natural language. MCP server with 8 tools for Eclipse headless build, serial capture, and firmware flashing via bdt.exe.",
+  "authors": [
+    {
+      "name": "JannLeo",
+      "github": "JannLeo"
+    }
+  ],
+  "license": "MIT",
+  "language": "Python",
+  "categories": ["Developer Tools", "Embedded System"],
+  "is_local": true,
+  "transport": "stdio",
+  "homepage": "https://github.com/JannLeo/telinksdk-builder-mcp",
+  "repository": "https://github.com/JannLeo/telinksdk-builder-mcp",
+  "dockerfile": "Dockerfile",
+  "entrypoint": "python trae_build_mcp.py"
+}
