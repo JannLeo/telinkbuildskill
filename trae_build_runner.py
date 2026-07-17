@@ -60,6 +60,29 @@ def load_builder(project_dir: Path) -> dict[str, Any]:
     return cfg
 
 
+def _ensure_builder(project_dir: Path) -> dict[str, Any]:
+    """Load builder.json; if missing, auto-generate via trae_build_init.detect().
+
+    Used by run_build / flash_run / serial_capture so a fresh repo with no
+    builder.json still works without a separate /build-init step.
+    """
+    try:
+        return load_builder(project_dir)
+    except FileNotFoundError:
+        log(f"[build] no builder.json in {project_dir}; auto-generating...")
+        try:
+            import trae_build_init as _init
+            cfg, detector = _init.detect(project_dir)
+            out_path = project_dir / "builder.json"
+            out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            log(f"[build] auto-generated {out_path} (detector: {detector})")
+        except Exception as e:  # noqa: BLE001
+            raise FileNotFoundError(
+                f"No builder.json in {project_dir} and auto-generation failed: {type(e).__name__}: {e}"
+            ) from e
+        return load_builder(project_dir)
+
+
 def resolve_script_path(cfg: dict[str, Any], project_dir: Path) -> Path:
     rel = cfg["build"]["script"]["path"]
     p = (project_dir / rel).resolve()
@@ -111,9 +134,15 @@ def run_build(
     extra_env: dict[str, str] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Execute the build. Returns a result dict (json-serializable)."""
+    """Execute the build. Returns a result dict (json-serializable).
+
+    If no builder.json exists, auto-generates one (no separate /build-init needed).
+    """
     project_dir = project_dir.resolve()
-    cfg = load_builder(project_dir)
+    try:
+        cfg = _ensure_builder(project_dir)
+    except FileNotFoundError as e:
+        return {"status": "error", "error": str(e), "project_dir": str(project_dir)}
 
     preset_params = resolve_preset(cfg, preset)
     merged = {**preset_params, **(params or {})}
@@ -309,7 +338,7 @@ def serial_capture(
     Caller args override config. Returns the captured text plus metadata.
     """
     project_dir = project_dir.resolve()
-    cfg = load_builder(project_dir)
+    cfg = _ensure_builder(project_dir)
     s_cfg = cfg.get("serial", {})
     port = port or s_cfg.get("default_port", "")
     baud = baud if baud is not None else int(s_cfg.get("baud", 115200))
@@ -427,7 +456,7 @@ def flash_run(
     chip_map, reset_after_flash, timeout). Caller args override config.
     """
     project_dir = project_dir.resolve()
-    cfg = load_builder(project_dir)
+    cfg = _ensure_builder(project_dir)
     f_cfg = cfg.get("flash", {})
     bdt_path = f_cfg.get("bdt_path") or _DEFAULT_BDT_PATH
 
