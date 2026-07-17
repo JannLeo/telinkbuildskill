@@ -42,6 +42,56 @@ def _read(path: Path, limit: int = 4096) -> str:
         return ""
 
 
+def _parse_cproject_configs(cp_path: Path) -> list[str]:
+    """Extract all cconfiguration names from a Telink Eclipse .cproject file.
+
+    Each cconfiguration has a child storageModule like:
+        <storageModule ... moduleId="org.eclipse.cdt.core.settings" name="CONFIG_NAME">
+    The CONFIG_NAME is what Eclipse headlessbuild -cleanBuild expects after the
+    project name prefix (e.g. 'B80_dongle_flash').
+
+    Returns the configs in document order (matches Eclipse UI order).
+    Empty list on read/parse failure.
+    """
+    try:
+        text = cp_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    # Match only the settings storageModule that carries the user-visible config
+    # name; other storageModules (cdtBuildSystem, etc.) also have name= attrs but
+    # with values like "TC32 Cross Target Application" that are not config names.
+    pattern = re.compile(
+        r'<storageModule\b[^>]*\bmoduleId="org\.eclipse\.cdt\.core\.settings"[^>]*\bname="([^"]+)"'
+    )
+    names = pattern.findall(text)
+    # Dedupe while preserving order (defensive; normally each config appears once).
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in names:
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _parse_project_name(project_path: Path) -> str:
+    """Extract the Eclipse project name from a .project file.
+
+    The .project file starts with <projectDescription><name>PROJECT_NAME</name>...
+    Other <name> tags exist for linked resources / natures, so we anchor on
+    <projectDescription> and take the immediately following <name>.
+
+    Returns the project name (e.g. 'B80_Driver_Demo') or '' on failure.
+    """
+    text = _read(project_path, 1024)  # project name always near the top
+    m = re.search(r'<projectDescription>\s*<name>([^<]+)</name>', text)
+    if m:
+        return m.group(1).strip()
+    # Last-resort fallback: first <name> tag in the file head.
+    m = re.search(r'<name>([^<]+)</name>', text)
+    return m.group(1).strip() if m else ""
+
+
 def _find(root: Path, patterns: list[str], max_depth: int = 4) -> list[Path]:
     out: list[Path] = []
     for p in root.rglob("*"):
@@ -185,63 +235,62 @@ def _detect_existing_robin(root: Path) -> dict[str, Any] | None:
 
 def _detect_telink_eclipse_only(root: Path) -> dict[str, Any] | None:
     """C-type: .cproject present but no release_sdk_tool and no post-build bats.
-    Pure Eclipse projects: use the generic eclipse_headless_build.ps1 script."""
+    Pure Eclipse projects: use the generic cross-platform eclipse_headless_build.py."""
     cprojects = _find(root, [".cproject"], max_depth=6)
     if not cprojects:
         return None
-    # Collect distinct chip/project dirs.
-    projects: list[tuple[str, str]] = []  # (chip, project_rel)
+    # For each .cproject: collect (project_name, project_rel, configs[]).
+    # project_name comes from the sibling .project file; configs from .cproject.
+    entries: list[tuple[str, str, list[str]]] = []
     for cp in cprojects:
-        parts = cp.relative_to(root).parts
-        chip = ""
         project_rel = cp.parent.relative_to(root).as_posix()
-        if "tlsr_tc32" in parts:
-            idx = parts.index("tlsr_tc32")
-            if idx + 1 < len(parts):
-                chip = parts[idx + 1]
-        if not chip:
-            chip = cp.parent.name
-        projects.append((chip, project_rel))
-    # Dedupe by project_rel.
-    seen = set()
-    uniq = []
-    for chip, prel in projects:
+        dot_project = cp.parent / ".project"
+        proj_name = _parse_project_name(dot_project) if dot_project.is_file() else cp.parent.name
+        configs = _parse_cproject_configs(cp)
+        if not configs:
+            # Fallback: guess from cconfiguration id (debug/release).
+            cp_txt = _read(cp, 8192)
+            m = re.search(r'com\.telink\.tc32eclipse\.configuration\.app\.(\w+)\.', cp_txt)
+            configs = [m.group(1).capitalize()] if m else ["Release"]
+        entries.append((proj_name, project_rel, configs))
+    # Dedupe by project_rel (keep first).
+    seen: set[str] = set()
+    uniq: list[tuple[str, str, list[str]]] = []
+    for pn, prel, cfgs in entries:
         if prel not in seen:
             seen.add(prel)
-            uniq.append((chip, prel))
-    projects = uniq
-    if not projects:
+            uniq.append((pn, prel, cfgs))
+    entries = uniq
+    if not entries:
         return None
-    default_chip, default_proj = projects[0]
-    # Extract build config name from first .cproject.
-    cp = cprojects[0]
-    cp_txt = _read(cp, 8192)
-    cfg_name = "Release"
-    m = re.search(r'com\.telink\.tc32eclipse\.configuration\.app\.(\w+)\.', cp_txt)
-    if m:
-        cfg_name = m.group(1).capitalize()
+    default_proj_name, default_proj_rel, default_configs = entries[0]
+    default_cfg = default_configs[0]
     # Generic headless script path (shipped with trae_builder).
-    headless_script = "D:/work/workspace/trae_builder/scripts/eclipse_headless_build.ps1"
+    # Resolve relative to this generator file so it works wherever the plugin is installed.
+    _here = Path(__file__).resolve().parent
+    headless_script = (_here / "scripts" / "eclipse_headless_build.py").as_posix()
     params = [
         {"name": "IdePath", "type": "path", "default": "C:\\TelinkIoTStudio", "description": "Telink IoT Studio / Eclipse IDE directory"},
-        {"name": "ProjectPath", "type": "path", "default": default_proj, "description": "Eclipse project dir relative to SDK root"},
-        {"name": "BuildTarget", "type": "string", "default": f"{default_chip}/{cfg_name}", "description": "Eclipse cleanBuild target: <Project>/<ConfigName>"},
+        {"name": "ProjectPath", "type": "path", "default": default_proj_rel, "description": "Eclipse project dir relative to SDK root"},
+        {"name": "BuildTarget", "type": "string", "default": f"{default_proj_name}/{default_cfg}", "description": "Eclipse cleanBuild target: <ProjectName>/<ConfigName>"},
         {"name": "WorkspaceDir", "type": "path", "default": "", "description": "Eclipse workspace dir; empty = auto (../woekspace/<sdkname>)"},
         {"name": "OutputDir", "type": "path", "default": "build_variants", "description": "Where collected artifacts go"},
     ]
     presets: list[dict[str, Any]] = []
-    for chip, prel in projects[:6]:
-        pname = f"{chip.lower()}_{cfg_name.lower()}"
-        presets.append({
-            "name": pname,
-            "description": f"Build {chip} {cfg_name} ({prel})",
-            "params": {"ProjectPath": prel, "BuildTarget": f"{chip}/{cfg_name}"},
-        })
+    for proj_name, prel, cfgs in entries[:6]:
+        for cfg in cfgs[:3]:  # cap configs per project to avoid preset explosion
+            # Preset name: projectname_config lowercase, sanitized.
+            pname = f"{proj_name.lower()}_{cfg.lower()}".replace(" ", "_").replace("/", "_")
+            presets.append({
+                "name": pname,
+                "description": f"Build {proj_name} / {cfg} ({prel})",
+                "params": {"ProjectPath": prel, "BuildTarget": f"{proj_name}/{cfg}"},
+            })
     return {
         "sdk": {"name": root.name, "type": "eclipse", "description": f"Telink SDK (Eclipse projects, no release_sdk_tool) - {root.name}"},
         "build": {
-            "script": {"path": headless_script, "interpreter": "powershell.exe", "execution_policy": "Bypass"},
-            "toolchain": {"studio_exe": "C:\\TelinkIoTStudio", "eclipse_launcher": "TelinkIoTStudio.exe", "default_build_target": f"{default_chip}/{cfg_name}"},
+            "script": {"path": headless_script, "interpreter": "", "execution_policy": "Bypass"},
+            "toolchain": {"studio_exe": "C:\\TelinkIoTStudio", "eclipse_launcher": "TelinkIoTStudio.exe", "default_build_target": f"{default_proj_name}/{default_cfg}"},
             "parameters": params,
             "presets": presets,
             "artifacts": {"scan_dirs": ["build_variants"], "name_pattern": "*.bin", "max_age_hours": 168},
@@ -303,7 +352,7 @@ def _fallback(root: Path) -> dict[str, Any]:
     return {
         "sdk": {"name": root.name, "type": "custom", "description": "Auto-generated template; please fill in build.script.path"},
         "build": {
-            "script": {"path": "REPLACE_WITH_BUILD_SCRIPT", "interpreter": "powershell.exe"},
+            "script": {"path": "REPLACE_WITH_BUILD_SCRIPT", "interpreter": ""},
             "parameters": [
                 {"name": "OutputDir", "type": "path", "default": "build", "description": "Artifacts dir"},
             ],
@@ -312,6 +361,39 @@ def _fallback(root: Path) -> dict[str, Any]:
             "timeout_seconds": 900,
         },
     }
+
+
+def _platform_finalize(cfg: dict[str, Any], detector_name: str) -> None:
+    """Adjust generated config for the current OS.
+
+    On non-Windows: Telink A/B-type build scripts are .bat (Windows-only); fall back
+    to the generic cross-platform eclipse_headless_build.py. Make-type and generic
+    scripts that are already cross-platform (.py/.sh/makefile) are left as-is.
+    Windows configs are returned unchanged (Telink .bat + IDE .exe work natively).
+    """
+    if os.name == "nt":
+        return  # Windows: keep Telink .bat / IDE .exe as detected.
+    build = cfg.get("build", {})
+    script = build.get("script", {})
+    path = script.get("path", "")
+    is_windows_only = path.lower().endswith(".bat")
+    sdk_type = cfg.get("sdk", {}).get("type", "")
+    # For eclipse-type repos with Windows-only scripts, switch to the generic headless python script.
+    if is_windows_only and sdk_type == "eclipse":
+        _here = Path(__file__).resolve().parent
+        headless = (_here / "scripts" / "eclipse_headless_build.py").as_posix()
+        script["path"] = headless
+        script["interpreter"] = ""  # runner auto-selects python
+        # IDE launcher name without .exe on Linux/macOS.
+        tc = build.get("toolchain", {})
+        if tc.get("eclipse_launcher") and tc["eclipse_launcher"].lower().endswith(".exe"):
+            tc["eclipse_launcher"] = tc["eclipse_launcher"][:-4]
+        # IdePath default: keep user's hint but it must point to a Linux Eclipse install; leave as-is (user edits).
+    # For makefile-type: interpreter 'make' is fine on Linux.
+    # For .bat generic scripts (non-eclipse) on Linux: leave but warn via description.
+    elif is_windows_only:
+        cfg.setdefault("sdk", {})["description"] = (cfg.get("sdk", {}).get("description", "") +
+            " [WARNING: detected .bat script is Windows-only; on Linux, point build.script.path to a .sh/.py script]")
 
 
 def detect(root: Path, ide_override: str | None = None) -> tuple[dict[str, Any], str]:
@@ -332,6 +414,7 @@ def detect(root: Path, ide_override: str | None = None) -> tuple[dict[str, Any],
                         p["default"] = ide_override
                 if "toolchain" in cfg["build"]:
                     cfg["build"]["toolchain"]["studio_exe"] = ide_override
+            _platform_finalize(cfg, name)
             cfg["schema_version"] = SCHEMA_VERSION
             return cfg, name
     cfg = _fallback(root)

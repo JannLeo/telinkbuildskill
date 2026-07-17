@@ -126,13 +126,26 @@ def run_build(
     cli_args = build_arg_list(cfg, merged, project_dir)
 
     cmd: list[str] = []
-    is_powershell = "powershell" in (interpreter or "").lower() or script_path.suffix.lower() in (".ps1",)
+    suffix = script_path.suffix.lower()
+    interp_low = (interpreter or "").lower()
+    is_powershell = "powershell" in interp_low or "pwsh" in interp_low or suffix == ".ps1"
     if is_powershell:
-        pwsh = interpreter or "powershell.exe"
+        pwsh = interpreter or ("powershell.exe" if os.name == "nt" else "pwsh")
         cmd = [pwsh, "-NoProfile", "-ExecutionPolicy", exec_policy or "Bypass", "-File", str(script_path)]
         cmd.extend(cli_args)
     elif interpreter:
         cmd = [interpreter, str(script_path)]
+        cmd.extend(cli_args)
+    elif suffix == ".py":
+        py = sys.executable or ("python" if os.name == "nt" else "python3")
+        cmd = [py, str(script_path)]
+        cmd.extend(cli_args)
+    elif suffix == ".sh":
+        cmd = ["bash", str(script_path)]
+        cmd.extend(cli_args)
+    elif suffix == ".bat" and os.name != "nt":
+        # .bat on non-Windows: best-effort via cmd.exe if available, else wine
+        cmd = ["cmd.exe", "/c", str(script_path)]
         cmd.extend(cli_args)
     else:
         cmd = [str(script_path)]

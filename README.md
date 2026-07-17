@@ -112,10 +112,19 @@ mcp_servers:
 |------|---------|---------|
 | **Telink A 型**(release_sdk_tool) | 找 `tools/release_sdk_tool/compile.bat` | IDE 路径、芯片列表(B80/B80B/tc122x 等)、每芯片一个预设 |
 | **Telink B 型**(telink_ble 后处理) | 找 `rom_lib.bat`/`flash_on_rom_lib.bat` + `.cproject` | 从 `.cproject` 提取构建配置名、芯片 |
-| **Telink C 型**(纯 Eclipse 工程) | 有 `.cproject` 但无上述脚本 | 扫描所有 `.cproject`,每工程一个预设,用通用 `eclipse_headless_build.ps1` |
+| **Telink C 型**(纯 Eclipse 工程) | 有 `.cproject` 但无上述脚本 | 从 `.project` 提取真实项目名、`.cproject` 提取所有配置,每工程×配置一个预设,用跨平台 `eclipse_headless_build.py` |
 | **Makefile** | 找 `Makefile`/`makefile` | 解析出 target 列表,每个 target 一个预设 |
 | **通用脚本** | 找根目录 `build.ps1`/`build.bat`/`build.sh` | 基础配置 |
 | **fallback 模板** | 以上均未命中 | 提示用户手填 `build.script.path` |
+
+## 跨平台支持(Windows / Linux / macOS)
+
+- **runner / MCP server / 生成器**:纯 Python stdlib,三平台通用。
+- **C 型构建脚本**:`scripts/eclipse_headless_build.py`(纯 Python)三平台通用;在 Windows 找 `TelinkIoTStudio.exe`/`eclipse.exe`,Linux/macOS 找 `eclipse`/`TelinkIoTStudio`。
+- **A/B 型**:Windows 下用仓库自带的 `.bat`(保留 Telink 多阶段编排);Linux/macOS 下生成器会自动把构建脚本切换到跨平台的 `eclipse_headless_build.py`,并把 IDE 启动器名去掉 `.exe`。
+- **runner 自动选解释器**:`.py`→python/python3,`.sh`→bash,`.ps1`→powershell/pwsh,`.bat`→cmd.exe。
+- **依赖**:仅需 Python 3.8+;Eclipse headless 编译还需对应平台的 Telink IoT Studio / Eclipse CDT。
+
 
 命令文件在 `~/.trae/commands/build-init.md`。也可命令行直接用:
 
