@@ -28,10 +28,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +149,15 @@ def run_build(
     preset_params = resolve_preset(cfg, preset)
     merged = {**preset_params, **(params or {})}
 
+    # Resolve .cproject info (per-config compile options) for the current
+    # ProjectPath so callers (CLI / MCP) can show what each build actually
+    # passes to the compiler. None if no .cproject is found.
+    proj_path_rel = merged.get("ProjectPath") or next(
+        (p.get("default", "") for p in cfg["build"].get("parameters", []) if p.get("name") == "ProjectPath"),
+        "",
+    )
+    cproject_info = _build_cproject_info(project_dir, proj_path_rel) if proj_path_rel else None
+
     script_path = resolve_script_path(cfg, project_dir)
     script_cfg = cfg["build"]["script"]
     interpreter = script_cfg.get("interpreter", "")
@@ -196,6 +207,7 @@ def run_build(
         "command": cmd,
         "timeout_seconds": effective_timeout,
         "dry_run": dry_run,
+        "cproject": cproject_info,
     }
 
     if dry_run:
@@ -276,11 +288,16 @@ def scan_artifacts(cfg: dict[str, Any], project_dir: Path) -> list[dict[str, Any
 
 def list_info(project_dir: Path) -> dict[str, Any]:
     cfg = load_builder(project_dir)
+    params_list = cfg["build"].get("parameters", [])
+    proj_path_rel = next(
+        (p.get("default", "") for p in params_list if p.get("name") == "ProjectPath"),
+        "",
+    )
     return {
         "project_dir": str(project_dir),
         "config_file": cfg.get("_path"),
         "sdk": cfg.get("sdk", {}),
-        "parameters": cfg["build"].get("parameters", []),
+        "parameters": params_list,
         "presets": cfg["build"].get("presets", []),
         "artifacts_config": cfg["build"].get("artifacts", {}),
         "timeout_seconds": cfg["build"].get("timeout_seconds", 900),
@@ -288,7 +305,242 @@ def list_info(project_dir: Path) -> dict[str, Any]:
         "toolchain": cfg["build"].get("toolchain", {}),
         "serial": cfg.get("serial", {}),
         "flash": cfg.get("flash", {}),
+        "cproject": _build_cproject_info(project_dir, proj_path_rel) if proj_path_rel else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# .cproject parsing (Eclipse CDT) - extracts compile options per cconfiguration
+# ---------------------------------------------------------------------------
+
+# superClass suffix -> field key in the parsed-options dict.
+_CPROJECT_OPT_FIELDS = {
+    "compiler.option.def": ("defines", "list"),
+    "compiler.option.incpath": ("includes", "list_path"),
+    "compiler.option.optimize": ("optimization", "optimize"),
+    "compiler.option.otherflags": ("other_flags", "str"),
+    "compiler.option.optimize.other": ("other_opt_flags", "str"),
+    "compiler.option.std": ("language_standard", "std"),
+    "compiler.option.optimize.packstruct": ("pack_structs", "bool"),
+    "compiler.option.optimize.shortenums": ("short_enums", "bool"),
+    "asm.option.flags": ("asm_flags", "str"),
+    "asm.option.include.paths": ("asm_includes", "list_path"),
+    "linker.option.libpath": ("libpath", "list_path"),
+    "linker.option.libs": ("libs", "list"),
+}
+
+_OPTIMIZE_MAP = {
+    "com.telink.tc32eclipse.compiler.optimize.none": "O0",
+    "com.telink.tc32eclipse.compiler.optimize.one": "O1",
+    "com.telink.tc32eclipse.compiler.optimize.two": "O2",
+    "com.telink.tc32eclipse.compiler.optimize.three": "O3",
+    "com.telink.tc32eclipse.compiler.optimize.size": "Os",
+}
+
+_STD_MAP = {
+    "com.telink.tc32eclipse.compiler.option.std.gnu99": "gnu99",
+    "com.telink.tc32eclipse.compiler.option.std.gnu11": "gnu11",
+    "com.telink.tc32eclipse.compiler.option.std.c99": "c99",
+    "com.telink.tc32eclipse.compiler.option.std.c11": "c11",
+}
+
+
+def _subst_eclipse_path(raw: str, project_name: str, config_name: str) -> str:
+    """Convert an Eclipse workspace_loc / ProjName / ConfigName string to a
+    project-relative path (or a substituted raw value if it doesn't match the
+    common workspace_loc pattern)."""
+    s = raw.strip()
+    # Strip surrounding quotes that CDT often emits in listOptionValue values.
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        s = s[1:-1]
+    # ${workspace_loc:/${ProjName}/<rest>}
+    m = re.match(r"^\$\{workspace_loc:/\$\{ProjName\}/(.*)\}$", s)
+    if m:
+        return m.group(1).rstrip("/")
+    # ${workspace_loc:/${ProjName}} (project root itself)
+    if s == "${workspace_loc:/${ProjName}}":
+        return ""
+    # Fall back: substitute variables inline.
+    s = s.replace("${ProjName}", project_name).replace("${ConfigName}", config_name)
+    return s
+
+
+def _map_optimize(value: str) -> str:
+    return _OPTIMIZE_MAP.get(value, (value.rsplit(".", 1)[-1] if value else ""))
+
+
+def _map_std(value: str) -> str:
+    return _STD_MAP.get(value, (value.rsplit(".", 1)[-1] if value else ""))
+
+
+def parse_cproject_options(cp_path: Path, project_name: str) -> dict[str, dict[str, Any]]:
+    """Parse a Telink Eclipse .cproject file and return per-config compile options.
+
+    Returns {config_name: {optimization, language_standard, defines, includes,
+    other_flags, other_opt_flags, pack_structs, short_enums, asm_flags,
+    asm_includes, linker_command, libpath, libs, postbuild, prebuild,
+    builder_command, builder_arguments, build_artifact_type}}.
+
+    Returns {} on read/parse failure (never raises).
+    """
+    try:
+        tree = ET.parse(cp_path)
+        root = tree.getroot()
+    except Exception:
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for cc in root.findall(".//cconfiguration"):
+        try:
+            settings = cc.find(".//storageModule[@moduleId='org.eclipse.cdt.core.settings']")
+            if settings is None:
+                continue
+            config_name = settings.get("name")
+            if not config_name:
+                continue
+            cfg = cc.find(".//storageModule[@moduleId='cdtBuildSystem']/configuration")
+            if cfg is None:
+                continue
+
+            entry: dict[str, Any] = {
+                "optimization": "",
+                "language_standard": "",
+                "defines": [],
+                "includes": [],
+                "other_flags": "",
+                "other_opt_flags": "",
+                "pack_structs": False,
+                "short_enums": False,
+                "asm_flags": "",
+                "asm_includes": [],
+                "linker_command": "",
+                "libpath": [],
+                "libs": [],
+                "postbuild": "",
+                "prebuild": "",
+                "builder_command": "",
+                "builder_arguments": "",
+                "build_artifact_type": "",
+            }
+
+            # buildArtefactType: e.g. 'com.telink.tc32eclipse.buildArtefactType.app'
+            art = cfg.get("buildArtefactType", "")
+            if art:
+                entry["build_artifact_type"] = art.rsplit(".", 1)[-1]
+            entry["postbuild"] = cfg.get("postbuildStep", "") or ""
+            entry["prebuild"] = cfg.get("prebuildStep", "") or ""
+
+            builder = cfg.find(".//builder")
+            if builder is not None:
+                entry["builder_command"] = builder.get("command", "") or ""
+                entry["builder_arguments"] = builder.get("arguments", "") or ""
+
+            # Tool commands (linker.command lives here, not in <option>).
+            for tool in cfg.findall(".//tool"):
+                sc = tool.get("superClass", "") or ""
+                cmd = tool.get("command", "") or ""
+                if "tool.linker" in sc:
+                    entry["linker_command"] = cmd
+
+            # Options (defines/includes/optimization/flags/...).
+            for opt in cfg.findall(".//option"):
+                sc = opt.get("superClass", "") or ""
+                # Strip any trailing .<id> instance suffix; match on the last
+                # dotted segment(s) we care about.
+                field = None
+                for suffix, (fname, ftype) in _CPROJECT_OPT_FIELDS.items():
+                    if sc.endswith(suffix):
+                        field = (fname, ftype)
+                        break
+                if field is None:
+                    continue
+                fname, ftype = field
+                if ftype == "list":
+                    values = []
+                    if opt.get("IS_VALUE_EMPTY", "false") != "true":
+                        for lv in opt.findall("listOptionValue"):
+                            v = lv.get("value", "")
+                            if v is not None:
+                                values.append(v)
+                    entry[fname] = values
+                elif ftype == "list_path":
+                    values = []
+                    if opt.get("IS_VALUE_EMPTY", "false") != "true":
+                        for lv in opt.findall("listOptionValue"):
+                            v = lv.get("value", "")
+                            if v is not None:
+                                values.append(_subst_eclipse_path(v, project_name, config_name))
+                    entry[fname] = values
+                elif ftype == "str":
+                    entry[fname] = opt.get("value", "") or ""
+                elif ftype == "bool":
+                    entry[fname] = (opt.get("value", "false") or "false").lower() == "true"
+                elif ftype == "optimize":
+                    entry[fname] = _map_optimize(opt.get("value", "") or "")
+                elif ftype == "std":
+                    entry[fname] = _map_std(opt.get("value", "") or "")
+
+            out[config_name] = entry
+        except Exception:
+            # One broken cconfiguration shouldn't sink the others.
+            continue
+    return out
+
+
+def _resolve_project_name(dot_project_path: Path) -> str:
+    """Read the Eclipse project name from a .project file. Falls back to the
+    parent dir name on failure."""
+    try:
+        import trae_build_init as _init
+        name = _init._parse_project_name(dot_project_path)
+        return name or dot_project_path.parent.name
+    except Exception:
+        return dot_project_path.parent.name
+
+
+def _build_cproject_info(project_dir: Path, project_path_rel: str) -> dict[str, Any] | None:
+    """Locate .cproject/.project under project_path_rel and assemble the
+    `cproject` field attached to `info`/`build` outputs. Returns None if no
+    .cproject is found at the given path."""
+    if not project_path_rel:
+        return None
+    cp_dir = (project_dir / project_path_rel).resolve()
+    cp_path = cp_dir / ".cproject"
+    if not cp_path.is_file():
+        return None
+    dot_proj = cp_dir / ".project"
+    proj_name = _resolve_project_name(dot_proj) if dot_proj.is_file() else cp_dir.name
+    configs = parse_cproject_options(cp_path, proj_name)
+    available_targets = [f"{proj_name}/{c}" for c in configs]
+    return {
+        "path": str(cp_path),
+        "project_name": proj_name,
+        "configs": configs,
+        "available_targets": available_targets,
+    }
+
+
+def _format_build_options_summary(target: str, opts: dict[str, Any] | None) -> str:
+    """Format a single config's parsed options as a human-readable block."""
+    if not opts:
+        return f"[build options for {target}]\n  (config not found in .cproject)"
+    lines = [f"[build options for {target}]"]
+    lines.append(f"  optimization   : {opts.get('optimization', '') or '(none)'}")
+    lines.append(f"  language       : {opts.get('language_standard', '') or '(none)'}")
+    lines.append(f"  defines        : {', '.join(opts.get('defines', [])) or '(none)'}")
+    lines.append(f"  includes       : {', '.join(opts.get('includes', [])) or '(none)'}")
+    lines.append(f"  other_flags    : {opts.get('other_flags', '') or '(none)'}")
+    lines.append(f"  other_opt_flags: {opts.get('other_opt_flags', '') or '(none)'}")
+    lines.append(f"  pack_structs   : {str(opts.get('pack_structs', False)).lower()}")
+    lines.append(f"  short_enums    : {str(opts.get('short_enums', False)).lower()}")
+    lines.append(f"  asm_flags      : {opts.get('asm_flags', '') or '(none)'}")
+    lines.append(f"  asm_includes   : {', '.join(opts.get('asm_includes', [])) or '(none)'}")
+    lines.append(f"  linker         : {opts.get('linker_command', '') or '(none)'}")
+    lines.append(f"  libpath        : {', '.join(opts.get('libpath', [])) or '(none)'}")
+    lines.append(f"  libs           : {', '.join(opts.get('libs', [])) or '(none)'}")
+    lines.append(f"  postbuild      : {opts.get('postbuild', '') or '(none)'}")
+    lines.append(f"  build_artifact : {opts.get('build_artifact_type', '') or '(none)'}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +886,22 @@ def main() -> int:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
         print(json.dumps(res, indent=2, ensure_ascii=False))
+        # Append a human-readable summary of the compile options for the
+        # current BuildTarget (split on '/' or '@' so both formats work).
+        cp_info = res.get("cproject")
+        if cp_info:
+            target = res.get("params", {}).get("BuildTarget", "") or ""
+            cfg_name = ""
+            for sep in ("/", "@"):
+                if sep in target:
+                    _, cfg_name = target.split(sep, 1)
+                    break
+            if not cfg_name:
+                cfg_name = target
+            opts = cp_info.get("configs", {}).get(cfg_name) if cfg_name else None
+            if opts is not None:
+                print()
+                print(_format_build_options_summary(target, opts))
         return 0 if res.get("status") in ("success", "dry-run") else 1
 
     if args.command == "list":

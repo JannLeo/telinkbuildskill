@@ -74,6 +74,44 @@ def _parse_cproject_configs(cp_path: Path) -> list[str]:
     return out
 
 
+def _parse_cproject_configs_with_type(cp_path: Path) -> list[tuple[str, bool]]:
+    """Extract (config_name, is_static_lib) for each cconfiguration in a Telink .cproject.
+
+    Pairs each config name from _parse_cproject_configs with a flag indicating
+    whether its buildArtefactType is 'staticLib' (vs the default 'app').
+
+    Returns list of (name, is_static_lib) in document order; empty list on failure.
+    """
+    try:
+        text = cp_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    # Split by <cconfiguration ...> opening tags; each block carries both the
+    # settings storageModule (with name=) and the cdtBuildSystem <configuration>
+    # element (with buildArtefactType=). Walk the blocks in order.
+    blocks = re.split(r"<cconfiguration\b", text)[1:]
+    out: list[tuple[str, bool]] = []
+    seen: set[str] = set()
+    for block in blocks:
+        # Take up to the matching </cconfiguration>. Each block ends with it.
+        end = block.find("</cconfiguration>")
+        block = block if end < 0 else block[:end]
+        m_name = re.search(
+            r'<storageModule\b[^>]*\bmoduleId="org\.eclipse\.cdt\.core\.settings"[^>]*\bname="([^"]+)"',
+            block,
+        )
+        if not m_name:
+            continue
+        name = m_name.group(1)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        m_art = re.search(r'buildArtefactType="([^"]+)"', block)
+        is_static = bool(m_art and "staticLib" in m_art.group(1))
+        out.append((name, is_static))
+    return out
+
+
 def _parse_project_name(project_path: Path) -> str:
     """Extract the Eclipse project name from a .project file.
 
@@ -127,42 +165,82 @@ def _detect_telink_a_type(root: Path) -> dict[str, Any] | None:
     launcher = "TelinkIoTStudio.exe"
     if "TelinkSDK" in ide_hint or "eclipse.exe" in txt:
         launcher = "eclipse.exe"
-    # Discover chip dirs under project/tlsr_tc32/*
-    chip_dirs: list[str] = []
+    # Discover chip dirs under project/tlsr_tc32/* (or nested <sdk>/.../project/tlsr_tc32/*).
+    # Each entry is (chip_name, project_rel) where project_rel is the Eclipse
+    # project dir relative to SDK root (e.g. 'project/tlsr_tc32/tc122x' or
+    # 'telink_b85m_platform_src/project/tlsr_tc32/tc122x').
+    chip_entries_raw: list[tuple[str, str]] = []
     for c in ("B80", "B80B", "B85", "B87", "B89", "TC321X", "TC1211", "tc122x"):
         d = root / "project" / "tlsr_tc32" / c
         if d.is_dir():
-            chip_dirs.append(c)
+            chip_entries_raw.append((c, d.relative_to(root).as_posix()))
     # Also search nested (some repos have project/ two levels down)
-    if not chip_dirs:
+    if not chip_entries_raw:
         for pd in _find(root, [".cproject"], max_depth=6):
             parts = pd.relative_to(root).parts
             if "project" in parts and "tlsr_tc32" in parts:
                 idx = parts.index("tlsr_tc32")
                 if idx + 1 < len(parts):
-                    chip_dirs.append(parts[idx + 1])
-        chip_dirs = sorted(set(chip_dirs))
-    default_chip = chip_dirs[0] if chip_dirs else "B80"
+                    chip = parts[idx + 1]
+                    proj_dir = pd.parent
+                    proj_rel = proj_dir.relative_to(root).as_posix()
+                    chip_entries_raw.append((chip, proj_rel))
+        # Dedupe by (chip, proj_rel) preserving order
+        seen: set[tuple[str, str]] = set()
+        deduped: list[tuple[str, str]] = []
+        for e in chip_entries_raw:
+            if e not in seen:
+                seen.add(e)
+                deduped.append(e)
+        chip_entries_raw = deduped
+    default_chip, default_proj_rel = chip_entries_raw[0] if chip_entries_raw else ("B80", f"project/tlsr_tc32/B80")
+    # For each chip dir, resolve the real Eclipse project name (from .project)
+    # and the real cconfiguration names (from .cproject). Falls back to the
+    # legacy hard-coded "<chip>/Release" target when parsing fails.
+    chip_entries: list[tuple[str, str, str, list[tuple[str, bool]]]] = []
+    for chip, proj_rel in chip_entries_raw:
+        cp_dir = root / proj_rel
+        cp_path = cp_dir / ".cproject"
+        dot_proj = cp_dir / ".project"
+        configs_with_type: list[tuple[str, bool]] = []
+        if cp_path.is_file():
+            configs_with_type = _parse_cproject_configs_with_type(cp_path)
+        if not configs_with_type:
+            configs_with_type = [("Release", False)]
+        proj_name = _parse_project_name(dot_proj) if dot_proj.is_file() else chip
+        if not proj_name:
+            proj_name = chip
+        chip_entries.append((chip, proj_rel, proj_name, configs_with_type))
+    default_proj_name, default_configs = (
+        (chip_entries[0][2], chip_entries[0][3]) if chip_entries else (default_chip, [("Release", False)])
+    )
+    default_build_target = f"{default_proj_name}/{default_configs[0][0]}"
     params: list[dict[str, Any]] = [
         {"name": "IdePath", "type": "path", "default": ide_hint, "description": "Telink IoT Studio / Eclipse IDE path"},
-        {"name": "ProjectPath", "type": "path", "default": f"project/tlsr_tc32/{default_chip}", "description": "Eclipse project dir relative to SDK root"},
-        {"name": "BuildTarget", "type": "string", "default": f"{default_chip}/Release", "description": "Eclipse cleanBuild target: <Project>/<ConfigName>"},
+        {"name": "ProjectPath", "type": "path", "default": default_proj_rel, "description": "Eclipse project dir relative to SDK root"},
+        {"name": "BuildTarget", "type": "string", "default": default_build_target, "description": "Eclipse cleanBuild target: <Project>/<ConfigName>"},
         {"name": "WorkspaceDir", "type": "path", "default": "", "description": "Eclipse workspace dir; empty = script default"},
         {"name": "OutputDir", "type": "path", "default": "build_variants", "description": "Where collected artifacts go"},
     ]
+    # Generate one preset per app config (skip staticLib). Preset name is the
+    # config name lowercased with non-alphanumerics replaced by '_'.
     presets: list[dict[str, Any]] = []
-    for chip in chip_dirs[:4]:
-        presets.append({
-            "name": f"{chip.lower()}_release",
-            "description": f"Build {chip} release firmware",
-            "params": {"ProjectPath": f"project/tlsr_tc32/{chip}", "BuildTarget": f"{chip}/Release"},
-        })
+    for chip, proj_rel, proj_name, configs_with_type in chip_entries:
+        for cfg_name, is_static in configs_with_type:
+            if is_static:
+                continue
+            pname = re.sub(r"[^a-z0-9]+", "_", cfg_name.lower()).strip("_")
+            presets.append({
+                "name": pname,
+                "description": f"Build {proj_name} / {cfg_name}",
+                "params": {"ProjectPath": proj_rel, "BuildTarget": f"{proj_name}/{cfg_name}"},
+            })
     script_rel = compile_bat.relative_to(root).as_posix()
     return {
         "sdk": {"name": root.name, "type": "eclipse", "description": f"Telink SDK (A-type, release_sdk_tool) - {root.name}"},
         "build": {
             "script": {"path": script_rel, "interpreter": "cmd.exe", "execution_policy": "Bypass"},
-            "toolchain": {"studio_exe": ide_hint, "eclipse_launcher": launcher, "default_build_target": f"{default_chip}/Release"},
+            "toolchain": {"studio_exe": ide_hint, "eclipse_launcher": launcher, "default_build_target": default_build_target},
             "parameters": params,
             "presets": presets,
             "artifacts": {"scan_dirs": ["build_variants"], "name_pattern": "*.bin", "max_age_hours": 168},
