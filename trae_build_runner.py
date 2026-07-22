@@ -702,10 +702,29 @@ def flash_run(
     timeout: int | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Invoke Telink bdt.exe to flash/read/reset the chip.
+    """Invoke Telink BDT Cmd_download_tool.exe to flash/read/reset the chip.
 
     Reads `cfg["flash"]` from builder.json for defaults (bdt_path, default_chip,
-    chip_map, reset_after_flash, timeout). Caller args override config.
+    device_id, flash_mode, reset_after_flash, timeout). Caller args override config.
+
+    BDT command-line format (verified with BDT v5.8.5 / TC122X):
+        Cmd_download_tool.exe <device_id> <chip> <command> <addr> [flags...]
+    where device_id=1 (single device), and flags include:
+        -i <file>   input file
+        -o <file>   output file
+        -s <size>   size (e.g. 64k)
+        -e          erase before write
+        -u          USB mode (omit for EVK mode)
+        -f          flash reset (for rst command)
+        -c          core reset (for rst command)
+
+    For EVK mode (default), the tool requires:
+        1. ac        — activate MCU (must succeed before wf/rf)
+        2. lf 0 0    — unlock flash (required before wf -e on protected flash)
+        3. wf ...    — write flash
+        4. rst -f    — reset MCU
+
+    For USB mode (add -u flag), ac/lf steps may be skipped.
     """
     project_dir = project_dir.resolve()
     cfg = _ensure_builder(project_dir)
@@ -715,7 +734,6 @@ def flash_run(
     # Resolve chip: arg > config default_chip > map from any preset's chip.
     chip = chip or f_cfg.get("default_chip", "")
     if not chip:
-        # Try to infer from presets' BuildTarget (e.g. "B80/Release" -> "B80").
         for p in cfg.get("build", {}).get("presets", []):
             bt = p.get("params", {}).get("BuildTarget", "")
             if "/" in bt:
@@ -725,6 +743,13 @@ def flash_run(
     if not chip:
         return {"status": "error",
                 "error": "No chip specified. Set flash.default_chip in builder.json or pass chip=."}
+
+    # Device ID (first positional arg to Cmd_download_tool.exe, 1=single device)
+    device_id = str(f_cfg.get("device_id", 1))
+
+    # Flash mode: "evk" (default, no -u flag) or "usb" (add -u flag)
+    flash_mode = f_cfg.get("flash_mode", "evk")
+    mode_flag = ["-u"] if flash_mode == "usb" else []
 
     # Auto-pick latest artifact as input_file for wf when none given.
     if not input_file and command in ("wf", "wc", "wo"):
@@ -740,23 +765,44 @@ def flash_run(
     if timeout is None:
         timeout = int(f_cfg.get("timeout_seconds", 120))
 
-    # Build command: bdt.exe <CHIP> <command> <address> [flags...]
-    cmd: list[str] = [bdt_path, chip, command, str(address)]
-    if input_file:
-        cmd += ["-i", str(input_file)]
-    if output_file:
-        cmd += ["-o", str(output_file)]
-    if size:
-        cmd += ["-s", str(size)]
-    if erase or f_cfg.get("default_erase", False):
-        cmd += ["-e"]
-    if extra_flags:
-        cmd += list(extra_flags)
+    def _run_bdt(bdt_cmd: list[str], t: int) -> tuple[int, str]:
+        """Execute a single BDT command, return (exit_code, output)."""
+        log(f"[flash] running: {' '.join(shlex.quote(c) for c in bdt_cmd)}")
+        try:
+            proc = subprocess.run(
+                bdt_cmd, cwd=str(project_dir),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=t,
+            )
+            return proc.returncode, (proc.stdout or "")[-4000:]
+        except subprocess.TimeoutExpired:
+            return -1, "(timed out)"
+        except FileNotFoundError as e:
+            return -1, str(e)
+
+    steps = f_cfg.get("steps", [])
+    is_multi_step = bool(steps) and command == "wf"
+
+    # Build the main command
+    def _build_cmd(cmd_command: str, cmd_addr: str = "", cmd_file: str = "",
+                   cmd_flags: list[str] | None = None) -> list[str]:
+        c: list[str] = [bdt_path, device_id, chip, cmd_command]
+        if cmd_addr:
+            c.append(cmd_addr)
+        if cmd_file:
+            c += ["-i", cmd_file]
+        if cmd_flags:
+            c += cmd_flags
+        c += mode_flag  # -u for USB, empty for EVK
+        return c
 
     result: dict[str, Any] = {
         "project_dir": str(project_dir),
         "bdt_path": bdt_path,
         "chip": chip,
+        "device_id": device_id,
+        "flash_mode": flash_mode,
         "command": command,
         "address": address,
         "input_file": input_file,
@@ -764,63 +810,143 @@ def flash_run(
         "size": size,
         "erase": erase or f_cfg.get("default_erase", False),
         "timeout_seconds": timeout,
-        "command_line": " ".join(shlex.quote(c) for c in cmd),
         "dry_run": dry_run,
     }
 
     if dry_run:
+        # Show what would be run
+        cmds_preview = []
+        if is_multi_step:
+            for step in steps:
+                if step == "ac":
+                    cmds_preview.append([bdt_path, device_id, chip, "ac"] + mode_flag)
+                elif step == "lf_unlock":
+                    cmds_preview.append([bdt_path, device_id, chip, "lf", "0", "0"] + mode_flag)
+                elif step == "wf_bootloader":
+                    boot_bin = f_cfg.get("bootloader_bin", "")
+                    cmds_preview.append([bdt_path, device_id, chip, "wf", "0", "-i", boot_bin, "-e"] + mode_flag)
+                elif step == "wf_app":
+                    app_bin = f_cfg.get("app_bin", "")
+                    app_addr = str(f_cfg.get("app_addr", 0))
+                    cmds_preview.append([bdt_path, device_id, chip, "wf", app_addr, "-i", app_bin] + mode_flag)
+                elif step == "wf":
+                    flags = ["-e"] if (erase or f_cfg.get("default_erase", False)) else []
+                    if input_file:
+                        flags += ["-i", input_file]
+                    cmds_preview.append([bdt_path, device_id, chip, "wf", str(address)] + flags + mode_flag)
+                elif step == "rst":
+                    cmds_preview.append([bdt_path, device_id, chip, "rst", "-f"] + mode_flag)
+        else:
+            main_cmd = [bdt_path, device_id, chip, command, str(address)]
+            if input_file:
+                main_cmd += ["-i", input_file]
+            if output_file:
+                main_cmd += ["-o", output_file]
+            if size:
+                main_cmd += ["-s", size]
+            if erase or f_cfg.get("default_erase", False):
+                main_cmd += ["-e"]
+            main_cmd += mode_flag
+            cmds_preview.append(main_cmd)
+        result["commands"] = [" ".join(shlex.quote(c) for c in cmd) for cmd in cmds_preview]
         result["status"] = "dry-run"
         return result
 
     if not Path(bdt_path).is_file():
         result["status"] = "error"
-        result["error"] = f"bdt.exe not found at {bdt_path}. Set flash.bdt_path in builder.json."
+        result["error"] = f"BDT tool not found at {bdt_path}. Set flash.bdt_path in builder.json."
         return result
 
-    log(f"[flash] running: {result['command_line']}")
     started = time.time()
-    try:
-        proc = subprocess.run(
-            cmd, cwd=str(project_dir),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=timeout,
-        )
-        rc = proc.returncode
-        result["exit_code"] = rc
-        result["output"] = (proc.stdout or "")[-4000:]  # tail to bound size
+    all_outputs: list[str] = []
+
+    if is_multi_step:
+        # Multi-step flash: ac -> lf_unlock -> wf_bootloader -> wf_app -> rst
+        step_results = []
+        for step in steps:
+            step_cmd: list[str] = []
+            step_name = step
+            step_timeout = timeout
+            if step == "ac":
+                step_cmd = [bdt_path, device_id, chip, "ac"] + mode_flag
+                step_timeout = min(timeout, 10)
+            elif step == "lf_unlock":
+                step_cmd = [bdt_path, device_id, chip, "lf", "0", "0"] + mode_flag
+                step_timeout = min(timeout, 10)
+            elif step == "wf_bootloader":
+                boot_bin = f_cfg.get("bootloader_bin", "")
+                if not boot_bin:
+                    continue
+                boot_path = str(project_dir / "build_variants" / boot_bin) if not os.path.isabs(boot_bin) else boot_bin
+                step_cmd = [bdt_path, device_id, chip, "wf", "0", "-i", boot_path, "-e"] + mode_flag
+            elif step == "wf_app":
+                app_bin = f_cfg.get("app_bin", "")
+                if not app_bin:
+                    continue
+                app_path = str(project_dir / "build_variants" / app_bin) if not os.path.isabs(app_bin) else app_bin
+                app_addr = str(f_cfg.get("app_addr", 0))
+                step_cmd = [bdt_path, device_id, chip, "wf", app_addr, "-i", app_path] + mode_flag
+            elif step == "wf":
+                flags = ["-e"] if (erase or f_cfg.get("default_erase", False)) else []
+                if input_file:
+                    flags += ["-i", input_file]
+                step_cmd = [bdt_path, device_id, chip, "wf", str(address)] + flags + mode_flag
+            elif step == "rst":
+                step_cmd = [bdt_path, device_id, chip, "rst", "-f"] + mode_flag
+                step_timeout = 10
+            else:
+                continue
+
+            rc, out = _run_bdt(step_cmd, step_timeout)
+            step_results.append({"step": step_name, "exit_code": rc, "output": out[-1000:]})
+            all_outputs.append(f"--- {step_name} (rc={rc}) ---\n{out}")
+            if rc != 0:
+                result["status"] = "failed"
+                result["exit_code"] = rc
+                result["output"] = "\n".join(all_outputs)[-4000:]
+                result["elapsed_seconds"] = round(time.time() - started, 2)
+                result["steps"] = step_results
+                log(f"[flash] FAILED at step '{step_name}' (exit={rc})")
+                return result
+
+        result["status"] = "success"
+        result["exit_code"] = 0
+        result["output"] = "\n".join(all_outputs)[-4000:]
         result["elapsed_seconds"] = round(time.time() - started, 2)
-        result["status"] = "success" if rc == 0 else "failed"
-        log(f"[flash] {result['status']} (exit={rc}, {result['elapsed_seconds']}s)")
-    except subprocess.TimeoutExpired:
-        result["status"] = "timeout"
-        result["elapsed_seconds"] = round(time.time() - started, 2)
-        result["output"] = "(timed out)"
-        log(f"[flash] TIMEOUT after {timeout}s")
-        return result
-    except FileNotFoundError as e:
-        result["status"] = "error"
-        result["error"] = str(e)
-        result["elapsed_seconds"] = round(time.time() - started, 2)
+        result["steps"] = step_results
+        log(f"[flash] SUCCESS (all {len(step_results)} steps, {result['elapsed_seconds']}s)")
         return result
 
-    # Optional auto-reset after write flash.
+    # Single-command mode (rf, wc, rc, ac, rst, etc.)
+    main_cmd = [bdt_path, device_id, chip, command, str(address)]
+    if input_file:
+        main_cmd += ["-i", input_file]
+    if output_file:
+        main_cmd += ["-o", output_file]
+    if size:
+        main_cmd += ["-s", size]
+    if erase or f_cfg.get("default_erase", False):
+        main_cmd += ["-e"]
+    main_cmd += mode_flag
+    if extra_flags:
+        main_cmd += list(extra_flags)
+
+    result["command_line"] = " ".join(shlex.quote(c) for c in main_cmd)
+
+    rc, out = _run_bdt(main_cmd, timeout)
+    result["exit_code"] = rc
+    result["output"] = out[-4000:]
+    result["elapsed_seconds"] = round(time.time() - started, 2)
+    result["status"] = "success" if rc == 0 else "failed"
+    log(f"[flash] {result['status']} (exit={rc}, {result['elapsed_seconds']}s)")
+
+    # Optional auto-reset after write flash (single-command mode only).
     if (rc == 0 and command == "wf"
-            and f_cfg.get("reset_after_flash", True)
-            and not dry_run):
-        rst_cmd = [bdt_path, chip, "rst", "-f"]
-        log(f"[flash] auto-reset: {' '.join(shlex.quote(c) for c in rst_cmd)}")
-        try:
-            rproc = subprocess.run(
-                rst_cmd, cwd=str(project_dir),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace",
-                timeout=30,
-            )
-            result["reset_exit_code"] = rproc.returncode
-            result["reset_output"] = (rproc.stdout or "")[-2000:]
-        except Exception as e:  # noqa: BLE001
-            result["reset_error"] = f"{type(e).__name__}: {e}"
+            and f_cfg.get("reset_after_flash", True)):
+        rst_cmd = [bdt_path, device_id, chip, "rst", "-f"] + mode_flag
+        rc2, rst_out = _run_bdt(rst_cmd, 30)
+        result["reset_exit_code"] = rc2
+        result["reset_output"] = rst_out[-2000:]
 
     return result
 
